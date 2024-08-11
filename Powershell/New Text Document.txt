@@ -1,0 +1,5 @@
+migration-service-account@shining-courage-432101-h8.iam.gserviceaccount.com	Migration Service Account	
+Owner
+
+No inheritance, for role Owner
+nicole@nicoleannphotos.com
