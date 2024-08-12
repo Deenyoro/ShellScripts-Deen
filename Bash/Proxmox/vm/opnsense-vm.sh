@@ -3,7 +3,7 @@
 
 function header_info {
     clear
-    cat <<"EOF"
+  cat <<"EOF"
 
                           (               (
   (   `  )    (     (    ))\  (     (    ))\
@@ -15,7 +15,6 @@ function header_info {
 
 Press Enter to Continue
 EOF
-    read -r
 }
 
 # Check next VMID across Proxmox Cluster
@@ -38,8 +37,8 @@ GN="\033[1;92m"
 RD="\033[01;31m"
 DGN="\033[32m"
 BGN="\033[4;92m"
-CM="${GN}✔${CL}"
-CROSS="${RD}✖${CL}"
+CM="${GN}✓${CL}"
+CROSS="${RD}✗${CL}"
 set -e
 trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
 trap cleanup EXIT
@@ -78,6 +77,9 @@ function cleanup() {
 }
 TEMP_DIR=$(mktemp -d)
 pushd $TEMP_DIR >/dev/null
+if ! whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "OPNsense VM" --yesno "This will create a New OPNsense VM. Proceed?" 10 58; then
+    header_info && echo -e "User exited script \n" && exit
+fi
 
 function check_root() {
     # Ensure the script is run as root to avoid permission issues.
@@ -122,9 +124,9 @@ function ssh_check() {
 }
 
 function exit_script() {
-    clear
-    echo -e "User exited script \n"
-    exit 1
+  clear
+  echo -e "User exited script \n"
+  exit 1
 }
 
 function default_settings() {
@@ -184,127 +186,52 @@ function prompt_root_password() {
 }
 
 function prompt_network_configuration() {
-    LAN_IPV4=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" --inputbox "Enter LAN IPv4 Address:" 8 60 --title "LAN IPv4 ADDRESS" 3>&1 1>&2 2<&3)
+    echo "Starting network configuration..."
+    LAN_IPV4=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" --inputbox "Enter LAN IPv4 Address:" 8 60 --title "LAN IPv4 ADDRESS" 3>&1 1>&2 2>&3)
+    echo "LAN_IPV4 prompt completed."
     if [ -z "$LAN_IPV4" ]; then
         msg_error "No LAN IPv4 Address entered. Exiting..."
         exit 1
     fi
-    SUBNET_MASK=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" --inputbox "Enter Subnet Mask (CIDR format):" 8 60 --title "SUBNET MASK" 3>&1 1>&2 2<&3)
+    echo "LAN IPv4 Address: $LAN_IPV4"
+    SUBNET_MASK=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" --inputbox "Enter Subnet Mask (CIDR format):" 8 60 --title "SUBNET MASK" 3>&1 1>&2 2>&3)
+    echo "SUBNET_MASK prompt completed."
     if [ -z "$SUBNET_MASK" ]; then
         msg_error "No Subnet Mask entered. Exiting..."
         exit 1
     fi
+    echo "Subnet Mask: $SUBNET_MASK"
     if whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "DHCP SERVER" --yesno "Enable DHCP Server?" 10 60; then
         ENABLE_DHCP="yes"
+    else
+        ENABLE_DHCP="no"
+    fi
+    echo "ENABLE_DHCP prompt completed: $ENABLE_DHCP"
+    if [ "$ENABLE_DHCP" = "yes" ]; then
+        echo "Starting DHCP configuration..."
         DHCP_START=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" --inputbox "Start of DHCP range:" 8 60 --title "DHCP RANGE START" 3>&1 1>&2 2<&3)
+        echo "DHCP_START prompt completed."
         if [ -z "$DHCP_START" ]; then
             msg_error "No DHCP Start Range entered. Exiting..."
             exit 1
         fi
+        echo "DHCP Start Range: $DHCP_START"
         DHCP_END=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" --inputbox "End of DHCP range:" 8 60 --title "DHCP RANGE END" 3>&1 1>&2 2<&3)
+        echo "DHCP_END prompt completed."
         if [ -z "$DHCP_END" ]; then
             msg_error "No DHCP End Range entered. Exiting..."
             exit 1
         fi
+        echo "DHCP End Range: $DHCP_END"
     else
-        ENABLE_DHCP="no"
+        echo "Skipping DHCP configuration..."
     fi
     if whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "HTTPS ACCESS" --yesno "Enable HTTPS for Web GUI?" 10 60; then
         ENABLE_HTTPS="y"
     else
         ENABLE_HTTPS="n"
     fi
-}
-
-function fetch_iso_online {
-    # Function to fetch the latest OPNsense ISO from NYCBUG with timeout
-    function fetch_iso_nycbug {
-        local page_content
-        page_content=$(curl -s --max-time 30 https://mirrors.nycbug.org/pub/opnsense/releases/mirror/)
-
-        local iso_url
-        iso_url=$(echo "$page_content" | grep -oP 'href="OPNsense-\d+\.\d+-dvd-amd64\.iso\.bz2"' | sort | tail -1 | cut -d'"' -f2)
-        if [[ -z "$iso_url" ]]; then
-            return 1  # Return 1 to indicate failure
-        fi
-
-        local iso_file
-        iso_file=$(basename "$iso_url")
-        local bz2_file="/var/lib/vz/template/iso/$iso_file"
-        local iso_path="${bz2_file%.bz2}"
-
-        wget -q --show-progress --timeout=60 "https://mirrors.nycbug.org/pub/opnsense/releases/mirror/$iso_url" -O "$bz2_file" && bunzip2 "$bz2_file"
-        return $?  # Return the exit code of the bunzip2 command
-    }
-
-    # Function to fetch the latest OPNsense ISO from Berkeley with timeout
-    function fetch_iso_berkeley {
-        local page_content
-        page_content=$(curl -s --max-time 30 https://mirrors.ocf.berkeley.edu/opnsense/releases/mirror/)
-
-        local iso_url
-        iso_url=$(echo "$page_content" | grep -oP 'href="OPNsense-\d+\.\d+-dvd-amd64\.iso\.bz2"' | sort | tail -1 | cut -d'"' -f2)
-        if [[ -z "$iso_url" ]]; then
-            return 1  # Return 1 to indicate failure
-        fi
-
-        local iso_file
-        iso_file=$(basename "$iso_url")
-        local bz2_file="/var/lib/vz/template/iso/$iso_file"
-        local iso_path="${bz2_file%.bz2}"
-
-        wget -q --show-progress --timeout=60 "https://mirrors.ocf.berkeley.edu/opnsense/releases/mirror/$iso_url" -O "$bz2_file" && bunzip2 "$bz2_file"
-        return $?  # Return the exit code of the bunzip2 command
-    }
-
-    msg_info "Attempting to download OPNsense ISO from NYCBUG..."
-    if fetch_iso_nycbug; then
-        msg_ok "ISO successfully downloaded from NYCBUG."
-    else
-        msg_info "NYCBUG download failed, attempting to download from Berkeley..."
-        if fetch_iso_berkeley; then
-            msg_ok "ISO successfully downloaded from Berkeley."
-        else
-            msg_error "Failed to download OPNsense ISO from both NYCBUG and Berkeley."
-            return 1
-        fi
-    fi
-}
-
-function offline_mode {
-    msg_info "Entering offline mode."
-    
-    # List all available ISOs in the Proxmox ISO store
-    local iso_list
-    iso_list=$(find /var/lib/vz/template/iso -name "*.iso" -exec basename {} \;)
-
-    if [[ -z "$iso_list" ]]; then
-        msg_error "No ISOs found in the Proxmox ISO store. Please upload an OPNsense ISO and try again."
-        exit 1
-    fi
-
-    # Display available ISOs and prompt the user to select one
-    local selected_iso
-    selected_iso=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "Select ISO" --menu "Select an OPNsense ISO from the list below:" 20 78 10 $(echo "$iso_list" | nl -w2 -s" ") 3>&1 1>&2 2<&3)
-
-    if [[ -z "$selected_iso" ]]; then
-        msg_error "No ISO selected. Exiting..."
-        exit 1
-    fi
-
-    # Extract the selected ISO file name
-    local iso_file
-    iso_file=$(echo "$iso_list" | sed -n "${selected_iso}p")
-
-    if [[ ! "$iso_file" =~ OPNsense ]]; then
-        if ! whiptail --backtitle "Proxmox VE OPNsense Install Script" --defaultno --title "WARNING" --yesno "The selected ISO does not appear to be an OPNsense ISO. Are you sure you want to continue?" 10 60; then
-            msg_error "Operation canceled by user. Exiting..."
-            exit 1
-        fi
-    fi
-
-    ISO_PATH="/var/lib/vz/template/iso/$iso_file"
-    msg_ok "Selected ISO: $iso_file"
+    echo "ENABLE_HTTPS prompt completed: $ENABLE_HTTPS"
 }
 
 function automate_install() {
@@ -566,14 +493,59 @@ fi
 msg_ok "Using $STORAGE for Storage Location."
 msg_ok "Virtual Machine ID is $VMID."
 
-# Ask the user if they want to run in offline mode or attempt to pull the ISO from a mirror
-if whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "MODE SELECTION" --yesno "Would you like to attempt to download the ISO from a mirror?" 10 60; then
-    if ! fetch_iso_online; then
-        msg_info "Switching to offline mode."
-        offline_mode
-    fi
+# Retrieve and download the OPNsense ISO.
+msg_info "Getting URL for OPNsense Disk Image"
+
+# Fetch the HTML content and extract the release date
+release_date=$(curl -s https://mirrors.ocf.berkeley.edu/opnsense/releases/mirror/ | grep -oP '(?<=<td class="date">)[0-9]{4}-[a-zA-Z]{3}-[0-9]{2}(?= [0-9]{2}:[0-9]{2})' | head -1)
+echo "Extracted release date: $release_date"
+
+# Check if the release date was extracted
+if [[ -z "$release_date" ]]; then
+    echo "Error: Release date not found."
+    exit 1
+fi
+
+# Manually convert the date format
+year=$(echo $release_date | cut -d'-' -f1)
+month=$(echo $release_date | cut -d'-' -f2)
+day=$(echo $release_date | cut -d'-' -f3)
+case $month in
+    Jan) month="01" ;;
+    Feb) month="02" ;;
+    Mar) month="03" ;;
+    Apr) month="04" ;;
+    May) month="05" ;;
+    Jun) month="06" ;;
+    Jul) month="07" ;;
+    Aug) month="08" ;;
+    Sep) month="09" ;;
+    Oct) month="10" ;;
+    Nov) month="11" ;;
+    Dec) month="12" ;;
+    *) echo "Invalid month"; exit 1 ;;
+esac
+formatted_date="${year}${month}${day}"
+echo "Formatted release date: $formatted_date"
+
+# Define the URL and paths
+URL="https://mirrors.ocf.berkeley.edu/opnsense/releases/mirror/OPNsense-24.7-dvd-amd64.iso.bz2"
+BZ2_FILE="${formatted_date}-OPNsense-24.7-dvd-amd64.iso.bz2"
+ISO_FILE="${formatted_date}-OPNsense-24.7-dvd-amd64.iso"
+BZ2_PATH="/var/lib/vz/template/iso/$BZ2_FILE"
+ISO_PATH="/var/lib/vz/template/iso/$ISO_FILE"
+
+# Check if the ISO file already exists
+if [ -f "$ISO_PATH" ]; then
+    msg_ok "ISO file already exists: $ISO_FILE"
 else
-    offline_mode
+    # Download the bz2 file
+    wget -q --show-progress $URL -O $BZ2_PATH
+    echo -en "\e[1A\e[0K"
+    msg_ok "Downloaded $BZ2_FILE"
+    # Extract the bz2 file
+    bunzip2 $BZ2_PATH
+    msg_ok "Extracted $BZ2_FILE to $ISO_FILE"
 fi
 
 # Determine the appropriate storage type and set up the disk configuration.
@@ -631,7 +603,7 @@ for (( i=1; i<=$RETRY_COUNT; i++ )); do
         exit 1
     fi
 done
-qm set $VMID -ide2 local:iso/$(basename $ISO_PATH),media=cdrom
+qm set $VMID -ide2 local:iso/$ISO_FILE,media=cdrom
 
 # Ensure boot order includes CD-ROM first and then SCSI
 msg_info "Setting boot order"
@@ -639,7 +611,7 @@ qm set $VMID -boot order=ide2;order=scsi0
 
 # Set the description for the VM
 CREATION_DATE=$(date +"%Y-%m-%d")
-ISO_USED=$(basename $ISO_PATH)
+ISO_USED=$ISO_FILE
 qm set $VMID \
 -description "# OPNsense - VM - $VMID - Created $CREATION_DATE - ISO Used: $ISO_USED</div><div align='center'><a href='https://opnsense.org/' target='_blank' rel='noopener noreferrer'><img src='https://icons.iconarchive.com/icons/simpleicons-team/simple/512/opnsense-icon.png'/></a><br><br>"
 msg_ok "Created an OPNsense VM (${HN})"
