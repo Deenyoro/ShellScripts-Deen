@@ -21,12 +21,10 @@ function header_info {
 \___/| .__/ |_||_| /__/\___||_||_| /__/\___|
      |_|    O P N S E N S E  F I R E W A L L
 
-Press Enter to Continue
 EOF
 }
 
 header_info
-read -r
 
 NEXTID=100  # Default VM ID
 CL="\033[m"
@@ -141,7 +139,7 @@ function ssh_check() {
         if ! whiptail --backtitle "Proxmox VE OPNsense Install Script" \
             --defaultno \
             --title "SSH DETECTED" \
-            --yesno "It's suggested to use the Proxmox shell instead of SSH. Proceed anyway?" 10 62; then
+            --yesno "It's suggested to use the Proxmox shell instead of SSH. Proceed anyway?" 10 62 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"; then
             clear
             exit 1
         fi
@@ -164,7 +162,7 @@ function default_settings() {
     CPU_TYPE="host"
     CORE_COUNT="2"
     RAM_SIZE="2048"
-    DISK_SIZE="80G"
+    DISK_SIZE="30G" # Default changed to 30G
     EFI_DISK_SIZE="8M" # Default in default settings
 
     if [ "$MANAGE_INTERFACES" = "yes" ]; then
@@ -188,42 +186,42 @@ function advanced_settings() {
     check_vmid
     VMID=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --inputbox "Virtual Machine ID (Default: $NEXTID)" 8 60 "$NEXTID" \
-        --title "VIRTUAL MACHINE ID" --cancel-button exit_script 3>&1 1>&2 2<&3) || exit_script
+        --title "VIRTUAL MACHINE ID" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
 
     HN=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --inputbox "Hostname (Default: OPNsense$VMID)" 8 60 "OPNsense${VMID}" \
-        --title "HOSTNAME" --cancel-button exit_script 3>&1 1>&2 2<&3) || exit_script
+        --title "HOSTNAME" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
 
     MACHINE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --title "MACHINE TYPE" --radiolist "Select machine type:" 10 60 2 \
         "q35" "Q35: Modern with PCIe support (recommended)" ON \
-        "i440fx" "Older, less feature-rich" OFF 3>&1 1>&2 2<&3) || exit_script
+        "i440fx" "Older, less feature-rich" OFF 3>&1 1>&2 2<&3 --cancel-button "Exit Script") || exit_script
 
     DISK_CACHE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --title "DISK CACHE" --radiolist "Disk cache type:" 10 60 2 \
         "none" "None (recommended)" ON \
-        "writeback" "Better performance, riskier" OFF 3>&1 1>&2 2<&3) || exit_script
+        "writeback" "Better performance, riskier" OFF 3>&1 1>&2 2<&3 --cancel-button "Exit Script") || exit_script
 
     CPU_TYPE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --title "CPU MODEL" --radiolist "CPU model:" 10 60 2 \
         "host" "Use host CPU features" ON \
-        "kvm64" "Generic" OFF 3>&1 1>&2 2<&3) || exit_script
+        "kvm64" "Generic" OFF 3>&1 1>&2 2<&3 --cancel-button "Exit Script") || exit_script
 
     CORE_COUNT=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --inputbox "Number of CPU cores (Default: 2)" 8 60 "2" \
-        --title "CPU CORES" --cancel-button exit_script 3>&1 1>&2 2<&3) || exit_script
+        --title "CPU CORES" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
 
     RAM_SIZE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --inputbox "RAM size in MiB (Default: 2048)" 8 60 "2048" \
-        --title "RAM SIZE" --cancel-button exit_script 3>&1 1>&2 2<&3) || exit_script
+        --title "RAM SIZE" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
 
     DISK_SIZE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --inputbox "Disk size (Default: 80G)" 8 60 "80G" \
-        --title "DISK SIZE" --cancel-button exit_script 3>&1 1>&2 2<&3) || exit_script
+        --inputbox "Disk size (Default: 30G)" 8 60 "30G" \
+        --title "DISK SIZE" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
 
     EFI_DISK_SIZE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --inputbox "EFI Disk size (Default: 8M)" 8 60 "8M" \
-        --title "EFI DISK SIZE" --cancel-button exit_script 3>&1 1>&2 2<&3) || exit_script
+        --title "EFI DISK SIZE" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
     if [ -z "$EFI_DISK_SIZE" ]; then
         EFI_DISK_SIZE="8M"
     fi
@@ -231,42 +229,47 @@ function advanced_settings() {
     if [ "$MANAGE_INTERFACES" = "yes" ]; then
         BRIDGE1=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
             --inputbox "INTERFACE (1/3) DEFAULT: opnwan" 8 60 "opnwan" \
-            --title "INTERFACE NAME (opnwan)" --cancel-button exit_script 3>&1 1>&2 2<&3) || exit_script
+            --title "INTERFACE NAME (opnwan)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
         MAC1=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
             --inputbox "MAC Address for opnwan" 8 60 "$(generate_mac)" \
-            --title "MAC ADDRESS (opnwan)" --cancel-button exit_script 3>&1 1>&2 2<&3) || exit_script
+            --title "MAC ADDRESS (opnwan)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
         MTU1=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
             --inputbox "MTU Size for opnwan (Default: 1500)" 8 60 "1500" \
-            --title "MTU SIZE (opnwan)" --cancel-button exit_script 3>&1 1>&2 2<&3) || exit_script
+            --title "MTU SIZE (opnwan)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
 
         BRIDGE2=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
             --inputbox "INTERFACE (2/3) DEFAULT: opnlan" 8 60 "opnlan" \
-            --title "INTERFACE NAME (opnlan)" --cancel-button exit_script 3>&1 1>&2 2<&3) || exit_script
+            --title "INTERFACE NAME (opnlan)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
         MAC2=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
             --inputbox "MAC Address for opnlan" 8 60 "$(generate_mac)" \
-            --title "MAC ADDRESS (opnlan)" --cancel-button exit_script 3>&1 1>&2 2<&3) || exit_script
+            --title "MAC ADDRESS (opnlan)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
         MTU2=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
             --inputbox "MTU Size for opnlan (Default: 1500)" 8 60 "1500" \
-            --title "MTU SIZE (opnlan)" --cancel-button exit_script 3>&1 1>&2 2<&3) || exit_script
+            --title "MTU SIZE (opnlan)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
 
         BRIDGE3=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
             --inputbox "INTERFACE (3/3) DEFAULT: opnmgmt" 8 60 "opnmgmt" \
-            --title "INTERFACE NAME (opnmgmt)" --cancel-button exit_script 3>&1 1>&2 2<&3) || exit_script
+            --title "INTERFACE NAME (opnmgmt)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
         MAC3=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
             --inputbox "MAC Address for opnmgmt" 8 60 "$(generate_mac)" \
-            --title "MAC ADDRESS (opnmgmt)" --cancel-button exit_script 3>&1 1>&2 2<&3) || exit_script
+            --title "MAC ADDRESS (opnmgmt)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
         MTU3=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
             --inputbox "MTU Size for opnmgmt (Default: 1500)" 8 60 "1500" \
-            --title "MTU SIZE (opnmgmt)" --cancel-button exit_script 3>&1 1>&2 2<&3) || exit_script
+            --title "MTU SIZE (opnmgmt)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
     fi
 
-    START_VM=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --title "START VIRTUAL MACHINE" --yesno "Start VM when completed?" 10 60 && echo "yes" || echo "no")
+    if (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+        --title "START VIRTUAL MACHINE" \
+        --yesno "Start VM when completed?" 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
+        START_VM="yes"
+    else
+        START_VM="no"
+    fi
 }
 
 function start_script() {
     if whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "SETTINGS" \
-        --yesno "Use Default Settings?" --defaultno 10 60; then
+        --yesno "Use Default Settings?" --defaultno 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"; then
         default_settings
     else
         advanced_settings
@@ -275,7 +278,7 @@ function start_script() {
 
 function prompt_root_password() {
     ROOT_PASSWORD=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --title "ROOT PASSWORD" --passwordbox "Enter root password:" 10 60 3>&1 1>&2 2<&3)
+        --title "ROOT PASSWORD" --passwordbox "Enter root password:" 10 60 --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
     if [ -z "$ROOT_PASSWORD" ]; then
         msg_error "No password entered. Exiting..."
         exit 1
@@ -284,30 +287,30 @@ function prompt_root_password() {
 
 function prompt_network_configuration() {
     LAN_IPV4=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --inputbox "Enter LAN IPv4 Address:" 8 60 --title "LAN IPv4 ADDRESS" 3>&1 1>&2 2>&3)
+        --inputbox "Enter LAN IPv4 Address:" 8 60 --title "LAN IPv4 ADDRESS" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
     if [ -z "$LAN_IPV4" ]; then
         msg_error "No LAN IPv4 Address entered. Exiting..."
         exit 1
     fi
 
     SUBNET_MASK=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --inputbox "Enter Subnet Mask (CIDR format, e.g., 24):" 8 60 --title "SUBNET MASK" 3>&1 1>&2 2>&3)
+        --inputbox "Enter Subnet Mask (CIDR format, e.g., 24):" 8 60 --title "SUBNET MASK" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
     if [ -z "$SUBNET_MASK" ]; then
         msg_error "No Subnet Mask entered. Exiting..."
         exit 1
     fi
 
-    if whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "DHCP SERVER" --yesno "Enable DHCP Server?" 10 60; then
+    if (whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "DHCP SERVER" --yesno "Enable DHCP Server?" 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
         ENABLE_DHCP="yes"
         DHCP_START=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Start of DHCP range:" 8 60 --title "DHCP RANGE START" 3>&1 1>&2 2>&3)
+            --inputbox "Start of DHCP range:" 8 60 --title "DHCP RANGE START" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
         if [ -z "$DHCP_START" ]; then
             msg_error "No DHCP Start Range entered. Exiting..."
             exit 1
         fi
 
         DHCP_END=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "End of DHCP range:" 8 60 --title "DHCP RANGE END" 3>&1 1>&2 2>&3)
+            --inputbox "End of DHCP range:" 8 60 --title "DHCP RANGE END" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
         if [ -z "$DHCP_END" ]; then
             msg_error "No DHCP End Range entered. Exiting..."
             exit 1
@@ -316,7 +319,7 @@ function prompt_network_configuration() {
         ENABLE_DHCP="no"
     fi
 
-    if whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "HTTPS ACCESS" --yesno "Enable HTTPS for Web GUI?" 10 60; then
+    if (whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "HTTPS ACCESS" --yesno "Enable HTTPS for Web GUI?" 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
         ENABLE_HTTPS="y"
     else
         ENABLE_HTTPS="n"
@@ -536,14 +539,14 @@ TEMP_DIR=$(mktemp -d)
 pushd "$TEMP_DIR" >/dev/null
 
 if ! whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "OPNsense VM" \
-    --yesno "This will create a New OPNsense VM. Proceed?" 10 58; then
+    --yesno "This will create a New OPNsense VM. Proceed?" 10 58 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"; then
     header_info && echo -e "User exited script.\n" && exit 1
 fi
 
 # Ask if we want to manage Proxmox host interfaces
 if ! whiptail --backtitle "Proxmox VE OPNsense Install Script" \
     --title "MANAGE PROXMOX INTERFACES" \
-    --yesno "Would you like the script to manage and configure the Proxmox host network interfaces and add them to the VM?\nIf no, the VM will not have the predefined interfaces set." 10 60; then
+    --yesno "Would you like the script to manage and configure the Proxmox host network interfaces and add them to the VM?\nIf no, the VM will not have the predefined interfaces set." 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"; then
     MANAGE_INTERFACES="no"
 else
     MANAGE_INTERFACES="yes"
@@ -568,7 +571,7 @@ fi
 
 STORAGE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "Storage Pools" --radiolist \
     "Which storage pool you would like to use for ${HN}?\nUse Spacebar to select." \
-16 80 6 "${STORAGE_MENU[@]}" 3>&1 1>&2 2<&3)
+16 80 6 "${STORAGE_MENU[@]}" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
 
 if [ -z "${STORAGE}" ]; then
     STORAGE="${STORAGE_MENU[0]}"
@@ -604,17 +607,17 @@ else
     ISO_PATH="/var/lib/vz/template/iso/$ISO_FILE"
 fi
 
-if whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+if (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
     --title "ISO SELECTION" \
-    --yesno "Would you like to download the OPNsense ISO from the internet?\n\nChoose 'No' to select a locally available ISO." 10 60; then
+    --yesno "Would you like to download the OPNsense ISO from the internet?\n\nChoose 'No' to select a locally available ISO." 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
     if [ -f "$ISO_PATH" ]; then
         msg_ok "ISO file already exists: $ISO_FILE"
     else
         msg_info "Downloading from $URL"
         if ! wget -q --show-progress "$URL" -O "$BZ2_PATH"; then
             msg_error "Failed to download from $URL."
-            if whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "LOCAL ISO" \
-                --yesno "Download failed. Select a locally available ISO?" 10 60; then
+            if (whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "LOCAL ISO" \
+                --yesno "Download failed. Select a locally available ISO?" 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
                 ISO_LIST=()
                 while IFS= read -r iso_file; do
                     ISO_LIST+=("$(basename "$iso_file")" "")
@@ -628,7 +631,7 @@ if whiptail --backtitle "Proxmox VE OPNsense Install Script" \
                 ISO_FILE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
                     --title "Local ISO Files" \
                     --radiolist "Select a local ISO file:" 16 60 6 \
-                    "${ISO_LIST[@]}" 3>&1 1>&2 2<&3)
+                    "${ISO_LIST[@]}" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
 
                 if [ -z "${ISO_FILE}" ]; then
                     msg_error "No ISO selected. Exiting..."
@@ -663,7 +666,7 @@ else
     ISO_FILE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --title "Local ISO Files" \
         --radiolist "Select a local ISO file:" 16 60 6 \
-        "${ISO_LIST[@]}" 3>&1 1>&2 2<&3)
+        "${ISO_LIST[@]}" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
 
     if [ -z "${ISO_FILE}" ]; then
         msg_error "No ISO selected. Exiting..."
@@ -733,9 +736,9 @@ qm set "$VMID" \
 msg_ok "Created an OPNsense VM (${HN})"
 
 if (whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "START VIRTUAL MACHINE" \
-    --yesno "Would you like to start the VM now?" 10 60); then
+    --yesno "Would you like to start the VM now?" 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
     if (whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "AUTOMATE SETUP" \
-        --yesno "Would you like to automate the setup?" 10 60); then
+        --yesno "Would you like to automate the setup?" 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
         prompt_root_password
         prompt_network_configuration
         msg_info "Starting OPNsense VM"
@@ -746,9 +749,9 @@ if (whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "START VIR
         msg_info "Starting OPNsense VM"
         qm start "$VMID"
         whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "INSTALL OPNsense" \
-            --msgbox "Install OPNsense to the VM now. When complete, press Enter." 10 60
+            --msgbox "Install OPNsense to the VM now. When complete, press Enter." 10 60 --ok-button "Ok"
         if (whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "REMOVE CD DRIVE" \
-            --yesno "Remove Mounted CD drive device from VM and set boot to VM drive?" 10 60); then
+            --yesno "Remove Mounted CD drive device from VM and set boot to VM drive?" 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
             qm stop "$VMID"
             msg_info "Removing CD drive and setting boot to VM drive"
             qm set "$VMID" -delete ide2
@@ -766,23 +769,23 @@ fi
 # Only ask to add interfaces if we managed interfaces
 if [ "$MANAGE_INTERFACES" = "yes" ]; then
     if (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --title "ADD INTERFACES" --yesno "Would you like to add the interfaces to /etc/network/interfaces?" 10 60); then
+        --title "ADD INTERFACES" --yesno "Would you like to add the interfaces to /etc/network/interfaces?" 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
         msg_info "Listing physical interfaces"
         PHYSICAL_INTERFACES=$(ip link show | grep -E '^[0-9]+:' | awk -F': ' '{print $2}')
         echo "Available physical interfaces:"
         echo "$PHYSICAL_INTERFACES"
 
         BRIDGE_PORT_WAN=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Enter bridge-ports for $BRIDGE1 (opnwan)" 8 60 --title "BRIDGE-PORTS (opnwan)" 3>&1 1>&2 2>&3)
+            --inputbox "Enter bridge-ports for $BRIDGE1 (opnwan)" 8 60 --title "BRIDGE-PORTS (opnwan)" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
         BRIDGE_PORT_LAN=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Enter bridge-ports for $BRIDGE2 (opnlan)" 8 60 --title "BRIDGE-PORTS (opnlan)" 3>&1 1>&2 2>&3)
+            --inputbox "Enter bridge-ports for $BRIDGE2 (opnlan)" 8 60 --title "BRIDGE-PORTS (opnlan)" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
         BRIDGE_PORT_MGMT=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Enter bridge-ports for $BRIDGE3 (opnmgmt)" 8 60 --title "BRIDGE-PORTS (opnmgmt)" 3>&1 1>&2 2>&3)
+            --inputbox "Enter bridge-ports for $BRIDGE3 (opnmgmt)" 8 60 --title "BRIDGE-PORTS (opnmgmt)" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
 
         MGMT_IP=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Enter static IP address for $BRIDGE3 (opnmgmt)" 8 60 --title "MGMT IP (opnmgmt)" 3>&1 1>&2 2>&3)
+            --inputbox "Enter static IP address for $BRIDGE3 (opnmgmt)" 8 60 --title "MGMT IP (opnmgmt)" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
         MGMT_GW=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Enter gateway for $BRIDGE3 (opnmgmt)" 8 60 --title "MGMT GATEWAY (opnmgmt)" 3>&1 1>&2 2>&3)
+            --inputbox "Enter gateway for $BRIDGE3 (opnmgmt)" 8 60 --title "MGMT GATEWAY (opnmgmt)" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
 
         echo "auto $BRIDGE1
 iface $BRIDGE1 inet manual
