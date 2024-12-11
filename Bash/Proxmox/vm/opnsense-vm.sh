@@ -310,12 +310,80 @@ function prompt_network_configuration() {
 }
 
 function automate_install() {
-    # Insert or modify automation steps within this function as needed.
-    # Current automation steps remain unchanged.
-
-    function send_line_to_vm() { ... }
-    function press_enter() { ... }
-
+    function send_line_to_vm() {
+        local line="$1"
+        for ((i = 0; i < ${#line}; i++)); do
+            character=${line:i:1}
+            case $character in
+                " ") character="spc" ;;
+                "-") character="minus" ;;
+                "=") character="equal" ;;
+                ",") character="comma" ;;
+                ".") character="dot" ;;
+                "/") character="slash" ;;
+                "'") character="apostrophe" ;;
+                ";") character="semicolon" ;;
+                '\\') character="backslash" ;;
+                '`') character="grave_accent" ;;
+                "[") character="bracket_left" ;;
+                "]") character="bracket_right" ;;
+                "_") character="shift-minus" ;;
+                "+") character="shift-equal" ;;
+                "?") character="shift-slash" ;;
+                "<") character="shift-comma" ;;
+                ">") character="shift-dot" ;;
+                '"') character="shift-apostrophe" ;;
+                ":") character="shift-semicolon" ;;
+                "|") character="shift-backslash" ;;
+                "~") character="shift-grave_accent" ;;
+                "{") character="shift-bracket_left" ;;
+                "}") character="shift-bracket_right" ;;
+                "A") character="shift-a" ;;
+                "B") character="shift-b" ;;
+                "C") character="shift-c" ;;
+                "D") character="shift-d" ;;
+                "E") character="shift-e" ;;
+                "F") character="shift-f" ;;
+                "G") character="shift-g" ;;
+                "H") character="shift-h" ;;
+                "I") character="shift-i" ;;
+                "J") character="shift-j" ;;
+                "K") character="shift-k" ;;
+                "L") character="shift-l" ;;
+                "M") character="shift-m" ;;
+                "N") character="shift-n" ;;
+                "O") character="shift-o" ;;
+                "P") character="shift-p" ;;
+                "Q") character="shift-q" ;;
+                "R") character="shift-r" ;;
+                "S") character="shift-s" ;;
+                "T") character="shift-t" ;;
+                "U") character="shift-u" ;;
+                "V") character="shift-v" ;;
+                "W") character="shift-w" ;;
+                "X") character="shift-x" ;;
+                "Y") character="shift-y" ;;
+                "Z") character="shift-z" ;;
+                "!") character="shift-1" ;;
+                "@") character="shift-2" ;;
+                "#") character="shift-3" ;;
+                '$') character="shift-4" ;;
+                "%") character="shift-5" ;;
+                "^") character="shift-6" ;;
+                "&") character="shift-7" ;;
+                "*") character="shift-8" ;;
+                "(") character="shift-9" ;;
+                ")") character="shift-0" ;;
+            esac
+            qm sendkey $VMID "$character"
+        done
+    }
+    
+    # Function to press Enter key
+    function press_enter() {
+        qm sendkey $VMID ret
+    }
+    
     # Define the automated steps
     function automate_setup() {
         local LAN_IPV4=$1
@@ -463,7 +531,6 @@ function automate_install() {
         press_enter
         echo "HTTPS configuration completed."
     }
-
     automate_setup "$LAN_IPV4" "$SUBNET_MASK" "$ENABLE_DHCP" "$DHCP_START" "$DHCP_END" "$ENABLE_HTTPS"
 }
 
