@@ -3,9 +3,9 @@
 
 set -euo pipefail
 
-######################################
-# User-Configurable Fallback Settings #
-######################################
+#################################################################################
+# ISO Download fallback settings if newest ISO cannot be automatically obtained #
+#################################################################################
 FALLBACK_URL="https://mirrors.ocf.berkeley.edu/opnsense/releases/24.7/OPNsense-24.7-dvd-amd64.iso.bz2"
 FALLBACK_RELEASE_DATE="2024-Jul-23"  # Known release date for OPNsense 24.7
 
