@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Purpose: Automate the creation of an OPNsense VM in Proxmox with optional network configuration and EFI disk size configuration.
+# Purpose: Automate the creation of an OPNsense VM in Proxmox.
 
 set -euo pipefail
 
@@ -26,7 +26,7 @@ EOF
 
 header_info
 
-NEXTID=100  # Default VM ID
+NEXTID=100
 CL="\033[m"
 GN="\033[1;92m"
 RD="\033[01;31m"
@@ -45,7 +45,7 @@ DHCP_START=""
 DHCP_END=""
 ENABLE_HTTPS=""
 MANAGE_INTERFACES="yes"
-EFI_DISK_SIZE="8M" # Default EFI Disk Size
+EFI_DISK_SIZE="8M"
 
 trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
 trap cleanup EXIT
@@ -162,8 +162,8 @@ function default_settings() {
     CPU_TYPE="host"
     CORE_COUNT="2"
     RAM_SIZE="2048"
-    DISK_SIZE="30G" # Default changed to 30G
-    EFI_DISK_SIZE="8M" # Default in default settings
+    DISK_SIZE="30G"
+    EFI_DISK_SIZE="8M"
 
     if [ "$MANAGE_INTERFACES" = "yes" ]; then
         BRIDGE1="opnwan"
@@ -543,7 +543,6 @@ if ! whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "OPNsense
     header_info && echo -e "User exited script.\n" && exit 1
 fi
 
-# Ask if we want to manage Proxmox host interfaces
 if ! whiptail --backtitle "Proxmox VE OPNsense Install Script" \
     --title "MANAGE PROXMOX INTERFACES" \
     --yesno "Would you like the script to manage and configure the Proxmox host network interfaces and add them to the VM?\nIf no, the VM will not have the predefined interfaces set." 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"; then
