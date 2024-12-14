@@ -1,0 +1,144 @@
+#!/bin/bash
+
+# =============================================================================
+# Script Name: cephosdmatch.sh
+# Description: Maps Ceph OSD IDs to their corresponding drive information,
+#              including device path, size, filesystem type, serial number, and WWN.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Ensure Bash version is 4 or higher for associative arrays
+# -----------------------------------------------------------------------------
+if [[ ${BASH_VERSINFO[0]} -lt 4 ]]; then
+    echo "Error: This script requires Bash version 4.0 or higher."
+    exit 1
+fi
+
+# -----------------------------------------------------------------------------
+# Function: print_header
+# Description: Prints the header for the output table
+# -----------------------------------------------------------------------------
+print_header() {
+    printf "%-6s %-60s %-8s %-12s %-20s %-20s\n" \
+        "OSD_ID" "DEVICE_PATH" "SIZE" "FSTYPE" "SERIAL" "WWN"
+    printf "%-6s %-60s %-8s %-12s %-20s %-20s\n" \
+        "------" "-----------" "----" "------" "------" "----"
+}
+
+# -----------------------------------------------------------------------------
+# Capture command outputs into variables
+# -----------------------------------------------------------------------------
+echo "Fetching Ceph and system information. Please wait..."
+
+# Get OSD to device mapping from 'ceph-volume lvm list'
+ceph_volume_output=$(ceph-volume lvm list 2>/dev/null)
+if [[ $? -ne 0 ]]; then
+    echo "Error: Failed to execute 'ceph-volume lvm list'. Ensure Ceph is installed and configured correctly."
+    exit 1
+fi
+
+# Get device info from 'lsblk', including SERIAL and WWN
+lsblk_output=$(lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT,SERIAL,WWN -P 2>/dev/null)
+if [[ $? -ne 0 ]]; then
+    echo "Error: Failed to execute 'lsblk'. Ensure lsblk is installed and accessible."
+    exit 1
+fi
+
+# -----------------------------------------------------------------------------
+# Declare associative arrays to store parsed data
+# -----------------------------------------------------------------------------
+declare -A OSD_DEVICE         # OSD ID -> Device Path
+declare -A LSBLK_SIZE         # Device Name -> Size
+declare -A LSBLK_FSTYPE       # Device Name -> Filesystem Type
+declare -A LSBLK_SERIAL        # Device Name -> Serial Number
+declare -A LSBLK_WWN           # Device Name -> WWN
+
+# -----------------------------------------------------------------------------
+# Parse 'ceph-volume lvm list' output to extract OSD IDs and Device Paths
+# -----------------------------------------------------------------------------
+echo "Debug: Parsing 'ceph-volume lvm list' output..."
+current_osd=""
+while IFS= read -r line; do
+    # Detect the start of a new OSD block with flexible '=' count
+    if [[ $line =~ ^=+\ osd\.([0-9]+)\ =+$ ]]; then
+        current_osd="${BASH_REMATCH[1]}"
+        echo "Debug: Processing OSD ID $current_osd"
+        continue
+    fi
+
+    # Extract the 'devices' field with flexible leading spaces
+    if [[ $line =~ ^[[:space:]]+devices[[:space:]]+(.+) ]]; then
+        device_path="${BASH_REMATCH[1]}"
+        # Assign device to current_osd
+        if [[ -n "$current_osd" ]]; then
+            if [[ -z "${OSD_DEVICE[$current_osd]}" ]]; then
+                OSD_DEVICE["$current_osd"]="$device_path"
+                echo "Debug: OSD ID $current_osd mapped to device $device_path"
+            else
+                echo "Warning: OSD ID $current_osd already mapped to device ${OSD_DEVICE[$current_osd]}, skipping additional device $device_path"
+            fi
+        else
+            echo "Warning: Found device '$device_path' without a corresponding OSD ID. Skipping."
+        fi
+    fi
+done <<< "$ceph_volume_output"
+
+# -----------------------------------------------------------------------------
+# Parse 'lsblk' output to extract device size, fstype, serial, wwn
+# -----------------------------------------------------------------------------
+echo "Debug: Parsing 'lsblk' output..."
+while IFS= read -r line; do
+    # Extract NAME, SIZE, FSTYPE, MOUNTPOINT, SERIAL, WWN from lsblk
+    NAME=$(echo "$line" | grep -oP 'NAME="\K[^"]+')
+    SIZE=$(echo "$line" | grep -oP 'SIZE="\K[^"]+')
+    FSTYPE=$(echo "$line" | grep -oP 'FSTYPE="\K[^"]+')
+    MOUNTPOINT=$(echo "$line" | grep -oP 'MOUNTPOINT="\K[^"]*')
+    SERIAL=$(echo "$line" | grep -oP 'SERIAL="\K[^"]+')
+    WWN=$(echo "$line" | grep -oP 'WWN="\K[^"]+')
+
+    LSBLK_SIZE["$NAME"]="$SIZE"
+    LSBLK_FSTYPE["$NAME"]="${FSTYPE:-N/A}"
+    LSBLK_SERIAL["$NAME"]="${SERIAL:-N/A}"
+    LSBLK_WWN["$NAME"]="${WWN:-N/A}"
+done <<< "$lsblk_output"
+
+# -----------------------------------------------------------------------------
+# Function: get_device_info
+# Description: Extracts device info (size, fstype, serial, wwn) from lsblk arrays
+# -----------------------------------------------------------------------------
+get_device_info() {
+    local device_path="$1"
+    # Extract the device name from the device path, e.g., /dev/sdi -> sdi
+    device_name=$(basename "$device_path")
+    size="${LSBLK_SIZE[$device_name]:-N/A}"
+    fstype="${LSBLK_FSTYPE[$device_name]:-N/A}"
+    serial="${LSBLK_SERIAL[$device_name]:-N/A}"
+    wwn="${LSBLK_WWN[$device_name]:-N/A}"
+    echo "$size" "$fstype" "$serial" "$wwn"
+}
+
+# -----------------------------------------------------------------------------
+# Function: print_mapping
+# Description: Prints the mapping of OSDs to device information
+# -----------------------------------------------------------------------------
+print_mapping() {
+    print_header
+
+    for osd_id in "${!OSD_DEVICE[@]}"; do
+        device_path="${OSD_DEVICE[$osd_id]}"
+        read -r size fstype serial wwn <<< "$(get_device_info "$device_path")"
+
+        # Print the mapping
+        printf "%-6s %-60s %-8s %-12s %-20s %-20s\n" \
+            "$osd_id" "$device_path" "$size" "$fstype" "$serial" "$wwn"
+    done
+}
+
+# -----------------------------------------------------------------------------
+# Execute the mapping and print the results
+# -----------------------------------------------------------------------------
+print_mapping
+
+# -----------------------------------------------------------------------------
+# End of Script
+# -----------------------------------------------------------------------------
