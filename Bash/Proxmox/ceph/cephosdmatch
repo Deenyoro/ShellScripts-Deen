@@ -1,10 +1,61 @@
 #!/bin/bash
 
-# =============================================================================
-# Script Name: cephosdmatch.sh
-# Description: Maps Ceph OSD IDs to their corresponding drive information,
-#              including device path, size, filesystem type, serial number, and WWN.
-# =============================================================================
+################################################################################
+# Ceph OSD Match Script with Comprehensive Documentation
+#
+# Description:
+#   This script, named `cephosdmatch.sh`, is designed to map Ceph OSD (Object Storage Daemon)
+#   IDs to their corresponding physical drive information. It gathers details such as
+#   device path, size, filesystem type, serial number, and WWN (World Wide Name) for
+#   each OSD. This mapping is crucial for administrators to understand the physical
+#   layout of their Ceph cluster and to perform maintenance or troubleshooting tasks
+#   effectively.
+#
+# Features:
+#   - **Bash Version Check:** Ensures that the script is running on Bash version 4 or higher,
+#     which is required for the use of associative arrays.
+#   - **Header Printing:** Defines a function to print a neatly formatted header for the output table.
+#   - **Information Gathering:**
+#       - **Ceph OSD Mapping:** Uses `ceph-volume lvm list` to retrieve the mapping between OSD IDs
+#         and their respective device paths.
+#       - **System Device Information:** Utilizes `lsblk` to gather detailed information about
+#         each block device, including size, filesystem type, serial number, and WWN.
+#   - **Data Parsing and Storage:**
+#       - **Associative Arrays:** Employs associative arrays to store and relate OSD IDs to device paths
+#         and device attributes.
+#       - **Parsing Logic:** Extracts relevant data from the outputs of `ceph-volume lvm list` and `lsblk`.
+#   - **Output Generation:** Compiles and displays a comprehensive table that maps each OSD ID to
+#     its physical device details.
+#
+# Usage:
+#   1. **Ensure Script Permissions:**
+#        Make sure the script has execute permissions.
+#        ```bash
+#        chmod +x cephosdmatch.sh
+#        ```
+#
+#   2. **Run the Script as Root:**
+#        Execute the script with root privileges to ensure it can access all necessary device information.
+#        ```bash
+#        sudo ./cephosdmatch.sh
+#        ```
+#
+#   3. **Review the Output:**
+#        The script will display a table with the following columns:
+#          - **OSD_ID:** The unique identifier for each Ceph OSD.
+#          - **DEVICE_PATH:** The filesystem path to the physical device (e.g., /dev/sdi).
+#          - **SIZE:** The size of the device.
+#          - **FSTYPE:** The filesystem type on the device.
+#          - **SERIAL:** The serial number of the device.
+#          - **WWN:** The World Wide Name of the device.
+#
+# Requirements:
+#   - **Bash Version 4 or Higher:** Necessary for using associative arrays.
+#   - **Ceph CLI Tools:** `ceph` and `ceph-volume` must be installed and properly configured.
+#   - **System Utilities:** Tools like `lsblk`, `pvs`, `lvs`, `vgremove`, `lvremove`,
+#     `pvremove`, `cryptsetup`, `lsof`, `umount`, and `wipefs` should be available.
+#
+################################################################################
 
 # -----------------------------------------------------------------------------
 # Ensure Bash version is 4 or higher for associative arrays
@@ -16,7 +67,7 @@ fi
 
 # -----------------------------------------------------------------------------
 # Function: print_header
-# Description: Prints the header for the output table
+# Description: Prints the header for the output table with formatted columns.
 # -----------------------------------------------------------------------------
 print_header() {
     printf "%-6s %-60s %-8s %-12s %-20s %-20s\n" \
@@ -27,6 +78,9 @@ print_header() {
 
 # -----------------------------------------------------------------------------
 # Capture command outputs into variables
+# Description:
+#   - `ceph-volume lvm list`: Retrieves the mapping between OSD IDs and device paths.
+#   - `lsblk`: Gathers detailed information about each block device.
 # -----------------------------------------------------------------------------
 echo "Fetching Ceph and system information. Please wait..."
 
@@ -46,15 +100,24 @@ fi
 
 # -----------------------------------------------------------------------------
 # Declare associative arrays to store parsed data
+# Description:
+#   - `OSD_DEVICE`: Maps OSD IDs to their device paths.
+#   - `LSBLK_SIZE`: Maps device names to their sizes.
+#   - `LSBLK_FSTYPE`: Maps device names to their filesystem types.
+#   - `LSBLK_SERIAL`: Maps device names to their serial numbers.
+#   - `LSBLK_WWN`: Maps device names to their WWNs.
 # -----------------------------------------------------------------------------
 declare -A OSD_DEVICE         # OSD ID -> Device Path
 declare -A LSBLK_SIZE         # Device Name -> Size
 declare -A LSBLK_FSTYPE       # Device Name -> Filesystem Type
-declare -A LSBLK_SERIAL        # Device Name -> Serial Number
-declare -A LSBLK_WWN           # Device Name -> WWN
+declare -A LSBLK_SERIAL       # Device Name -> Serial Number
+declare -A LSBLK_WWN          # Device Name -> WWN
 
 # -----------------------------------------------------------------------------
 # Parse 'ceph-volume lvm list' output to extract OSD IDs and Device Paths
+# Description:
+#   Iterates through the output of `ceph-volume lvm list` to map each OSD ID
+#   to its corresponding device path. Handles multiple devices per OSD if present.
 # -----------------------------------------------------------------------------
 echo "Debug: Parsing 'ceph-volume lvm list' output..."
 current_osd=""
@@ -85,6 +148,9 @@ done <<< "$ceph_volume_output"
 
 # -----------------------------------------------------------------------------
 # Parse 'lsblk' output to extract device size, fstype, serial, wwn
+# Description:
+#   Processes the output of `lsblk` to populate the associative arrays with
+#   device attributes for later mapping.
 # -----------------------------------------------------------------------------
 echo "Debug: Parsing 'lsblk' output..."
 while IFS= read -r line; do
@@ -104,7 +170,9 @@ done <<< "$lsblk_output"
 
 # -----------------------------------------------------------------------------
 # Function: get_device_info
-# Description: Extracts device info (size, fstype, serial, wwn) from lsblk arrays
+# Description:
+#   Given a device path, retrieves its size, filesystem type, serial number, and WWN
+#   from the parsed `lsblk` data. Returns 'N/A' if any information is missing.
 # -----------------------------------------------------------------------------
 get_device_info() {
     local device_path="$1"
@@ -119,7 +187,8 @@ get_device_info() {
 
 # -----------------------------------------------------------------------------
 # Function: print_mapping
-# Description: Prints the mapping of OSDs to device information
+# Description:
+#   Prints the mapping of OSDs to their device information in a formatted table.
 # -----------------------------------------------------------------------------
 print_mapping() {
     print_header
@@ -136,6 +205,8 @@ print_mapping() {
 
 # -----------------------------------------------------------------------------
 # Execute the mapping and print the results
+# Description:
+#   Calls the print_mapping function to display the OSD to device mappings.
 # -----------------------------------------------------------------------------
 print_mapping
 
