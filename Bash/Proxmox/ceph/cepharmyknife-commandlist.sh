@@ -446,7 +446,7 @@ while true; do
     echo "  7. Remove OSDs"
     echo "  8. Check Cluster Health"
     echo "  9. Show OSD to Device Mapping"
-    echo "  10. Manage CephX Authentication"    # <-- Added this option for CephX support
+    echo "  10. Manage CephX Authentication"
     echo
     echo "11. Exit"
 
@@ -461,7 +461,7 @@ while true; do
         7) remove_osds ;;
         8) check_cluster_health ;;
         9) show_osd_device_mapping ;;
-        10) manage_cephx ;;    # If user selects 10, we run manage_cephx function.
+        10) manage_cephx ;;
         11)
             echo "Exiting. Commands remain in memory unless saved. Goodbye."
             exit 0
