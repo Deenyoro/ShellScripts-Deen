@@ -189,11 +189,22 @@ get_device_info() {
 # Function: print_mapping
 # Description:
 #   Prints the mapping of OSDs to their device information in a formatted table.
+#   Improvement: Sort OSD IDs numerically to ensure a consistent order of output.
+#   Improvement: If no OSDs found, print a notification.
 # -----------------------------------------------------------------------------
 print_mapping() {
     print_header
 
-    for osd_id in "${!OSD_DEVICE[@]}"; do
+    # Sort OSD IDs numerically for consistent output order
+    osd_ids=($(printf "%s\n" "${!OSD_DEVICE[@]}" | sort -n))
+
+    # If no OSD mappings found, inform the user
+    if [ ${#osd_ids[@]} -eq 0 ]; then
+        echo "No OSD mappings found. Ensure that 'ceph-volume lvm list' returned valid data."
+        return
+    fi
+
+    for osd_id in "${osd_ids[@]}"; do
         device_path="${OSD_DEVICE[$osd_id]}"
         read -r size fstype serial wwn <<< "$(get_device_info "$device_path")"
 
@@ -201,6 +212,9 @@ print_mapping() {
         printf "%-6s %-60s %-8s %-12s %-20s %-20s\n" \
             "$osd_id" "$device_path" "$size" "$fstype" "$serial" "$wwn"
     done
+
+    # Additional improvement: Print a summary line
+    echo "Total OSDs mapped: ${#osd_ids[@]}"
 }
 
 # -----------------------------------------------------------------------------
