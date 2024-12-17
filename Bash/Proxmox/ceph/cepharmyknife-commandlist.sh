@@ -11,9 +11,6 @@
 # to review these commands and choose whether to execute them now or save them  #
 # to a file for later execution. This approach lets you carefully review and    #
 # confirm all operations before making changes to your cluster.                 #
-#                                                                              #
-# We overexplain each step as we implement it, so you know exactly what's going  #
-# on. Please note these explanations are in the script as comments for clarity. #
 ################################################################################
 
 # Default settings - these influence defaults for pools, compression, autoscaler:
@@ -21,6 +18,7 @@ DEFAULT_COMPRESSION_ALGO="zstd"      # Default compression algorithm
 DEFAULT_COMPRESSION_MODE="passive"   # Default compression mode
 DEFAULT_AUTOSCALE_MODE="on"          # Default PG autoscaling mode
 DEFAULT_PG_TARGET_PER_OSD=100        # Target PG count per OSD
+DEFAULT_REPLICATION_SIZE=3           # Default replication size
 LOGFILE="/var/log/ceph_setup_commands.log"
 
 # COMMANDS array will store all Ceph commands as we go along. We don't run them
@@ -148,7 +146,7 @@ create_crush_and_ec() {
         if [ -n "$EC_RULE_NAME" ]; then
             add_cmd "ceph osd crush rule create-erasure $EC_RULE_NAME $EC_PROFILE"
         fi
-    fi
+    }
 }
 
 # Step 3: Create Pools
@@ -172,16 +170,31 @@ create_pools() {
         read -p "Enter pool type (1 or 2): " POOL_TYPE
 
         read -p "Enter the rule name for this pool (e.g. replicated_myclass or ec_myecprofile_rule): " POOL_RULE
-        read -p "Enter pg_num: " PG_NUM
-        read -p "Enter pgp_num (often same as pg_num): " PGP_NUM
+
+        # Calculate default PG_NUM based on DEFAULT_PG_TARGET_PER_OSD and total OSDs
+        TOTAL_OSDS=$(ceph osd ls | wc -l)
+        if [ "$TOTAL_OSDS" -eq 0 ]; then
+            echo "Unable to determine total number of OSDs. You may not have any OSDs created yet."
+            read -p "Enter total number of OSDs planned for this cluster: " TOTAL_OSDS
+        fi
+        if [ -z "$TOTAL_OSDS" ] || [ "$TOTAL_OSDS" -eq 0 ]; then
+            echo "Cannot calculate default PG number without number of OSDs."
+            PG_NUM_DEFAULT=""
+        else
+            PG_NUM_DEFAULT=$(( (TOTAL_OSDS * DEFAULT_PG_TARGET_PER_OSD) / 1 ))
+            # For simplicity, we assign all PGs to this pool. Adjust as needed.
+        fi
+
+        read -p "Enter pg_num [${PG_NUM_DEFAULT}]: " PG_NUM
+        PG_NUM=${PG_NUM:-$PG_NUM_DEFAULT}
+        read -p "Enter pgp_num (often same as pg_num) [${PG_NUM}]: " PGP_NUM
         PGP_NUM=${PGP_NUM:-$PG_NUM}
 
         if [ "$POOL_TYPE" = "1" ]; then
             add_cmd "ceph osd pool create $POOL_NAME $PG_NUM $PGP_NUM replicated $POOL_RULE"
-            read -p "Enter replication size (e.g. 3): " SIZE
-            if [ -n "$SIZE" ]; then
-                add_cmd "ceph osd pool set $POOL_NAME size $SIZE"
-            fi
+            read -p "Enter replication size [${DEFAULT_REPLICATION_SIZE}]: " SIZE
+            SIZE=${SIZE:-$DEFAULT_REPLICATION_SIZE}
+            add_cmd "ceph osd pool set $POOL_NAME size $SIZE"
         else
             add_cmd "ceph osd pool create $POOL_NAME $PG_NUM $PGP_NUM erasure $POOL_RULE"
             read -p "Allow EC overwrites? (y/n): " EC_OW
@@ -200,6 +213,9 @@ create_pools() {
         if [ -n "$APP" ]; then
             add_cmd "ceph osd pool application enable $POOL_NAME $APP"
         fi
+
+        # Set pg_autoscale_mode to default
+        add_cmd "ceph osd pool set $POOL_NAME pg_autoscale_mode $DEFAULT_AUTOSCALE_MODE"
 
         echo "Pool $POOL_NAME configured. Add another or press Enter to finish."
     done
@@ -248,34 +264,39 @@ set_pool_properties() {
             break
         fi
         echo "Options for $P_NAME:"
-        echo "1) Set 'bulk' flag"
-        echo "2) Set pg_autoscale_mode"
-        echo "3) Set compression_algorithm"
-        echo "4) Set compression_mode"
-        echo "5) Set size"
+        echo "1) Set 'bulk' flag (default: false)"
+        echo "2) Set pg_autoscale_mode (default: ${DEFAULT_AUTOSCALE_MODE})"
+        echo "3) Set compression_algorithm (default: ${DEFAULT_COMPRESSION_ALGO})"
+        echo "4) Set compression_mode (default: ${DEFAULT_COMPRESSION_MODE})"
+        echo "5) Set size (replication factor) (default: ${DEFAULT_REPLICATION_SIZE})"
         echo "6) Done with this pool"
 
         while true; do
             read -p "Choose an option (1-6): " PROP_CHOICE
             case $PROP_CHOICE in
                 1)
-                    read -p "Set bulk to 'true' or 'false': " BULK_VAL
+                    read -p "Set bulk to 'true' or 'false' [false]: " BULK_VAL
+                    BULK_VAL=${BULK_VAL:-false}
                     add_cmd "ceph osd pool set $P_NAME bulk $BULK_VAL"
                     ;;
                 2)
-                    read -p "Set pg_autoscale_mode (on/off/warn): " AUTO_VAL
+                    read -p "Set pg_autoscale_mode (on/off/warn) [${DEFAULT_AUTOSCALE_MODE}]: " AUTO_VAL
+                    AUTO_VAL=${AUTO_VAL:-$DEFAULT_AUTOSCALE_MODE}
                     add_cmd "ceph osd pool set $P_NAME pg_autoscale_mode $AUTO_VAL"
                     ;;
                 3)
-                    read -p "Set compression_algorithm (none/zstd/lz4/zlib): " CALGO
+                    read -p "Set compression_algorithm (none/zstd/lz4/zlib) [${DEFAULT_COMPRESSION_ALGO}]: " CALGO
+                    CALGO=${CALGO:-$DEFAULT_COMPRESSION_ALGO}
                     add_cmd "ceph osd pool set $P_NAME compression_algorithm $CALGO"
                     ;;
                 4)
-                    read -p "Set compression_mode (none/passive/aggressive/force): " CMODE
+                    read -p "Set compression_mode (none/passive/aggressive/force) [${DEFAULT_COMPRESSION_MODE}]: " CMODE
+                    CMODE=${CMODE:-$DEFAULT_COMPRESSION_MODE}
                     add_cmd "ceph osd pool set $P_NAME compression_mode $CMODE"
                     ;;
                 5)
-                    read -p "Set replication size: " NEW_SIZE
+                    read -p "Set replication size [${DEFAULT_REPLICATION_SIZE}]: " NEW_SIZE
+                    NEW_SIZE=${NEW_SIZE:-$DEFAULT_REPLICATION_SIZE}
                     add_cmd "ceph osd pool set $P_NAME size $NEW_SIZE"
                     ;;
                 6)
