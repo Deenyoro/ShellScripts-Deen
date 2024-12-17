@@ -1,13 +1,24 @@
+#!/bin/bash
 
-# Ceph OSD and Pool Management Script with Cephx Support - These commands are executed immediately
+################################################################################
+# Ceph OSD and Pool Management Script with Cephx Support - These commands are  #
+# executed immediately                                                         #
+#                                                                              #
+# This script will guide you through various Ceph cluster management tasks,    #
+# including creating OSDs, pools, managing CephFS, configuring encryption,     #
+# and managing CephX authentication. It provides detailed explanations and     #
+# configurable options at each step, allowing you to customize settings or     #
+# accept defaults by pressing Enter.                                           #
+################################################################################
 
 # Default settings
-DEFAULT_CRUSH_CLASS="ssd"
-DEFAULT_COMPRESSION_ALGO="zstd"
-DEFAULT_COMPRESSION_MODE="passive"
-DEFAULT_AUTOSCALE_MODE="on"
+DEFAULT_CRUSH_CLASS="ssd"            # Default CRUSH device class
+DEFAULT_COMPRESSION_ALGO="zstd"      # Default compression algorithm
+DEFAULT_COMPRESSION_MODE="passive"   # Default compression mode
+DEFAULT_AUTOSCALE_MODE="on"          # Default PG autoscaling mode
+DEFAULT_PG_TARGET_PER_OSD=100        # Target PGs per OSD
+DEFAULT_REPLICATION_SIZE=3           # Default replication size
 LOGFILE="/var/log/ceph_osd_setup.log"
-DEFAULT_PG_TARGET_PER_OSD=100  # Target PGs per OSD
 
 # Ensure the script is run as root
 if [[ $EUID -ne 0 ]]; then
@@ -201,7 +212,7 @@ create_pool() {
     # List available pools
     list_pools
 
-    # List available CRUSH classes
+    # List available CRUSH device classes
     list_crush_classes
 
     # Pool name input
@@ -228,13 +239,13 @@ create_pool() {
         echo "- **What is Replication Size?**"
         echo "  The number of copies of each piece of data in the cluster."
         echo "- **Default Value:**"
-        echo "  The default replication size is 3, meaning each piece of data is stored on 3 OSDs."
+        echo "  The default replication size is $DEFAULT_REPLICATION_SIZE, meaning each piece of data is stored on $DEFAULT_REPLICATION_SIZE OSDs."
         echo "- **Considerations:**"
         echo "  A higher replication size provides better data redundancy but uses more storage space."
         echo "---------------------------------------"
 
-        read -p "Enter the replication size [default: 3]: " REPLICATION_SIZE_INPUT
-        REPLICATION_SIZE="${REPLICATION_SIZE_INPUT:-3}"
+        read -p "Enter the replication size [default: $DEFAULT_REPLICATION_SIZE]: " REPLICATION_SIZE_INPUT
+        REPLICATION_SIZE="${REPLICATION_SIZE_INPUT:-$DEFAULT_REPLICATION_SIZE}"
 
         # Calculate PG_NUM
         echo "---------------------------------------"
@@ -358,7 +369,8 @@ create_pool() {
         # Erasure Coded Pool Creation
 
         # Read CRUSH Device Class
-        read -p "Enter the CRUSH Device Class for the pool: " CRUSH_CLASS
+        read -p "Enter the CRUSH Device Class for the pool [default: $DEFAULT_CRUSH_CLASS]: " CRUSH_CLASS_INPUT
+        CRUSH_CLASS="${CRUSH_CLASS_INPUT:-$DEFAULT_CRUSH_CLASS}"
 
         echo "---------------------------------------"
         echo "**Erasure Coding Overview:**"
@@ -368,10 +380,15 @@ create_pool() {
         echo "- **Parameters:**"
         echo "  - k (Data Chunks)"
         echo "  - m (Parity Chunks)"
+        echo "  - crush-failure-domain (e.g., host, rack, etc.)"
         echo "---------------------------------------"
 
-        read -p "Enter the number of data chunks (k): " EC_DATA_CHUNKS
-        read -p "Enter the number of parity chunks (m): " EC_PARITY_CHUNKS
+        read -p "Enter the number of data chunks (k) [default: 2]: " EC_DATA_CHUNKS_INPUT
+        EC_DATA_CHUNKS="${EC_DATA_CHUNKS_INPUT:-2}"
+        read -p "Enter the number of parity chunks (m) [default: 1]: " EC_PARITY_CHUNKS_INPUT
+        EC_PARITY_CHUNKS="${EC_PARITY_CHUNKS_INPUT:-1}"
+        read -p "Enter the crush-failure-domain [default: host]: " EC_FAILURE_DOMAIN_INPUT
+        EC_FAILURE_DOMAIN="${EC_FAILURE_DOMAIN_INPUT:-host}"
 
         # Calculate PG_NUM
         echo "---------------------------------------"
@@ -403,8 +420,18 @@ create_pool() {
         read -p "Enter the number of PGs [default: $PG_NUM]: " PG_NUM_INPUT
         PG_NUM="${PG_NUM_INPUT:-$PG_NUM}"
 
+        echo "---------------------------------------"
+        echo "**Autoscale Mode Options:**"
+        echo "  - on: Automatically adjust PGs as the pool grows (recommended)"
+        echo "  - off: No automatic adjustment"
+        echo "  - warn: Warn when the pool is near PG limits"
+        echo "---------------------------------------"
+
+        read -p "Enter the autoscale mode [default: $DEFAULT_AUTOSCALE_MODE]: " AUTOSCALE_MODE_INPUT
+        AUTOSCALE_MODE="${AUTOSCALE_MODE_INPUT:-$DEFAULT_AUTOSCALE_MODE}"
+
         log "Creating erasure code profile..."
-        run_cmd "ceph osd erasure-code-profile set ${POOL_NAME}_ecprofile k=$EC_DATA_CHUNKS m=$EC_PARITY_CHUNKS crush-device-class=$CRUSH_CLASS crush-failure-domain=host"
+        run_cmd "ceph osd erasure-code-profile set ${POOL_NAME}_ecprofile k=$EC_DATA_CHUNKS m=$EC_PARITY_CHUNKS crush-device-class=$CRUSH_CLASS crush-failure-domain=$EC_FAILURE_DOMAIN"
 
         log "Creating CRUSH rule for erasure-coded pool..."
         run_cmd "ceph osd crush rule create-erasure ${POOL_NAME}_erasure_rule ${POOL_NAME}_ecprofile"
@@ -412,8 +439,15 @@ create_pool() {
         log "Creating erasure-coded pool..."
         run_cmd "ceph osd pool create $POOL_NAME $PG_NUM $PG_NUM erasure ${POOL_NAME}_erasure_rule"
 
-        log "Setting autoscale mode to $DEFAULT_AUTOSCALE_MODE..."
-        run_cmd "ceph osd pool set $POOL_NAME pg_autoscale_mode $DEFAULT_AUTOSCALE_MODE"
+        log "Setting autoscale mode to $AUTOSCALE_MODE..."
+        run_cmd "ceph osd pool set $POOL_NAME pg_autoscale_mode $AUTOSCALE_MODE"
+
+        read -p "Allow overwrites on erasure-coded pool? (y/n) [default: n]: " ALLOW_EC_OVERWRITES_INPUT
+        ALLOW_EC_OVERWRITES="${ALLOW_EC_OVERWRITES_INPUT:-n}"
+        if [[ "$ALLOW_EC_OVERWRITES" =~ ^[Yy]$ ]]; then
+            log "Setting allow_ec_overwrites to true..."
+            run_cmd "ceph osd pool set $POOL_NAME allow_ec_overwrites true"
+        fi
 
     else
         echo "Invalid pool type selection. Exiting."
@@ -440,21 +474,26 @@ create_metadata_pool() {
     read -p "Enter the name for the metadata pool: " METADATA_POOL_NAME
 
     # Read CRUSH Device Class for SSDs
-    read -p "Enter the CRUSH Device Class for SSDs [default: ssd]: " SSD_CRUSH_CLASS_INPUT
-    SSD_CRUSH_CLASS="${SSD_CRUSH_CLASS_INPUT:-ssd}"
+    read -p "Enter the CRUSH Device Class for SSDs [default: $DEFAULT_CRUSH_CLASS]: " SSD_CRUSH_CLASS_INPUT
+    SSD_CRUSH_CLASS="${SSD_CRUSH_CLASS_INPUT:-$DEFAULT_CRUSH_CLASS}"
 
     # Replication size for metadata pool
     echo "---------------------------------------"
     echo "**Metadata Pool Replication Size Overview:**"
-    echo "- **Default Replication Size:** 3"
+    echo "- **Default Replication Size:** $DEFAULT_REPLICATION_SIZE"
     echo "---------------------------------------"
 
-    read -p "Enter the replication size for the metadata pool [default: 3]: " META_REPLICATION_SIZE_INPUT
-    META_REPLICATION_SIZE="${META_REPLICATION_SIZE_INPUT:-3}"
+    read -p "Enter the replication size for the metadata pool [default: $DEFAULT_REPLICATION_SIZE]: " META_REPLICATION_SIZE_INPUT
+    META_REPLICATION_SIZE="${META_REPLICATION_SIZE_INPUT:-$DEFAULT_REPLICATION_SIZE}"
 
     # Calculate PG_NUM
     echo "Calculating PG_NUM for metadata pool..."
     NUM_OSDS=$(ceph osd crush class ls-osd $SSD_CRUSH_CLASS | wc -l)
+    if [ "$NUM_OSDS" -eq 0 ]; then
+        echo "No OSDs found with device class $SSD_CRUSH_CLASS."
+        read -p "Enter the total number of OSDs planned for this device class: " NUM_OSDS_INPUT
+        NUM_OSDS="${NUM_OSDS_INPUT:-1}"
+    fi
     RECOMMENDED_PG_NUM=$(( ($NUM_OSDS * $DEFAULT_PG_TARGET_PER_OSD) / $META_REPLICATION_SIZE ))
     PG_NUM=$(awk -v n=$RECOMMENDED_PG_NUM 'BEGIN{
         lower=2^int(log(n)/log(2));
@@ -665,16 +704,16 @@ remediate_lvm() {
     echo "LVM remediation completed."
 }
 
-# Function to create replicated pool (placeholder to demonstrate additional functionality)
+# Function to create replicated pool
 create_replicated_pool() {
     echo "---------------------------------------"
     echo "Create a Replicated Pool"
     echo "---------------------------------------"
-    # This can leverage the create_pool function or replicate its logic
+    # This utilizes the create_pool function with replicated pool option
     create_pool
 }
 
-# Function to create erasure-coded pool (placeholder)
+# Function to create erasure-coded pool
 create_ec_pool() {
     echo "---------------------------------------"
     echo "Create an Erasure-Coded Pool"
@@ -682,32 +721,82 @@ create_ec_pool() {
     create_pool
 }
 
-# Function to configure pool properties (placeholder)
+# Function to configure pool properties
 configure_pool_properties() {
     echo "---------------------------------------"
     echo "Configure Pool Properties"
     echo "---------------------------------------"
-    # Implement logic to set properties like 'bulk', 'pg_autoscale_mode', etc.
-    # For demonstration, just listing pools:
+    # Implementing logic similar to 'set_pool_properties' in the previous script
+
     list_pools
-    # In a real scenario, prompt user for pool name and properties to set.
+
+    while true; do
+        read -p "Enter a pool name to configure (or blank to finish): " P_NAME
+        if [ -z "$P_NAME" ]; then
+            break
+        fi
+        echo "Options for $P_NAME:"
+        echo "1) Set 'bulk' flag (default: false)"
+        echo "2) Set pg_autoscale_mode (default: ${DEFAULT_AUTOSCALE_MODE})"
+        echo "3) Set compression_algorithm (default: ${DEFAULT_COMPRESSION_ALGO})"
+        echo "4) Set compression_mode (default: ${DEFAULT_COMPRESSION_MODE})"
+        echo "5) Set size (replication factor) (default: ${DEFAULT_REPLICATION_SIZE})"
+        echo "6) Done with this pool"
+
+        while true; do
+            read -p "Choose an option (1-6): " PROP_CHOICE
+            case $PROP_CHOICE in
+                1)
+                    read -p "Set bulk to 'true' or 'false' [false]: " BULK_VAL
+                    BULK_VAL=${BULK_VAL:-false}
+                    run_cmd "ceph osd pool set $P_NAME bulk $BULK_VAL"
+                    ;;
+                2)
+                    read -p "Set pg_autoscale_mode (on/off/warn) [${DEFAULT_AUTOSCALE_MODE}]: " AUTO_VAL
+                    AUTO_VAL=${AUTO_VAL:-$DEFAULT_AUTOSCALE_MODE}
+                    run_cmd "ceph osd pool set $P_NAME pg_autoscale_mode $AUTO_VAL"
+                    ;;
+                3)
+                    read -p "Set compression_algorithm (none/zstd/lz4/zlib) [${DEFAULT_COMPRESSION_ALGO}]: " CALGO
+                    CALGO=${CALGO:-$DEFAULT_COMPRESSION_ALGO}
+                    run_cmd "ceph osd pool set $P_NAME compression_algorithm $CALGO"
+                    ;;
+                4)
+                    read -p "Set compression_mode (none/passive/aggressive/force) [${DEFAULT_COMPRESSION_MODE}]: " CMODE
+                    CMODE=${CMODE:-$DEFAULT_COMPRESSION_MODE}
+                    run_cmd "ceph osd pool set $P_NAME compression_mode $CMODE"
+                    ;;
+                5)
+                    read -p "Set replication size [${DEFAULT_REPLICATION_SIZE}]: " NEW_SIZE
+                    NEW_SIZE=${NEW_SIZE:-$DEFAULT_REPLICATION_SIZE}
+                    run_cmd "ceph osd pool set $P_NAME size $NEW_SIZE"
+                    ;;
+                6)
+                    break
+                    ;;
+                *)
+                    echo "Invalid choice."
+                    ;;
+            esac
+        done
+    done
 }
 
-# Function to create CephFS (placeholder)
+# Function to create CephFS
 create_cephfs() {
     echo "---------------------------------------"
     echo "Create CephFS"
     echo "---------------------------------------"
     # Prompt user for metadata pool and data pool, then create CephFS
+    read -p "Enter CephFS name: " FSNAME
     read -p "Enter metadata pool: " METAPOOL
     read -p "Enter data pool: " DATAPOOL
-    read -p "Enter CephFS name: " FSNAME
     run_cmd "ceph fs new $FSNAME $METAPOOL $DATAPOOL"
     ceph fs ls
     ceph fs status $FSNAME
 }
 
-# Function to manage CephFS pools (placeholder)
+# Function to manage CephFS pools
 manage_cephfs_pools() {
     echo "---------------------------------------"
     echo "Manage CephFS Pools"
@@ -719,13 +808,13 @@ manage_cephfs_pools() {
     ceph fs status $FSNAME
 }
 
-# Function to configure encryption (placeholder)
+# Function to configure encryption
 configure_encryption() {
     echo "---------------------------------------"
     echo "Configure Encryption"
     echo "---------------------------------------"
-    # Encryption is already handled at OSD creation with --dmcrypt.
-    echo "OSDs are created with dmcrypt option. Additional encryption steps can be implemented here."
+    echo "OSDs are created with dmcrypt option by default in this script."
+    echo "Additional encryption configurations can be implemented here if needed."
 }
 
 # Function to manage CephX authentication
@@ -746,8 +835,9 @@ manage_cephx() {
             ;;
         2)
             read -p "Enter entity name (e.g., client.myuser): " ENTITY
-            read -p "Enter caps (e.g., mon 'allow r' osd 'allow rwx'): " CAPS
-            run_cmd "ceph auth add $ENTITY $CAPS"
+            echo "Enter caps in the format: mon 'allow r' osd 'allow rwx', etc."
+            read -p "Enter caps: " CAPS
+            run_cmd "ceph auth get-or-create $ENTITY $CAPS"
             ;;
         3)
             read -p "Enter entity name to delete: " ENTITY
@@ -755,6 +845,7 @@ manage_cephx() {
             ;;
         4)
             read -p "Enter entity name: " ENTITY
+            echo "Enter new caps in format: mon 'allow r', osd 'allow rwx', etc."
             read -p "Enter new caps: " CAPS
             run_cmd "ceph auth caps $ENTITY $CAPS"
             ;;
@@ -764,18 +855,19 @@ manage_cephx() {
     esac
 }
 
-# Function to create CRUSH rules (placeholder)
+# Function to create CRUSH rules
 create_crush_rules() {
     echo "---------------------------------------"
     echo "Create CRUSH Rules"
     echo "---------------------------------------"
     # Example: create a replicated CRUSH rule
     read -p "Enter rule name: " RULENAME
-    read -p "Enter device class: " DEVICECLASS
+    read -p "Enter device class [default: $DEFAULT_CRUSH_CLASS]: " DEVICECLASS_INPUT
+    DEVICECLASS="${DEVICECLASS_INPUT:-$DEFAULT_CRUSH_CLASS}"
     run_cmd "ceph osd crush rule create-replicated $RULENAME default host $DEVICECLASS"
 }
 
-# Function to check cluster health (placeholder)
+# Function to check cluster health
 check_cluster_health() {
     echo "---------------------------------------"
     echo "Check Cluster Health"
@@ -784,7 +876,7 @@ check_cluster_health() {
     ceph health detail
 }
 
-# Function to show OSD to device mapping (placeholder)
+# Function to show OSD to device mapping
 show_osd_device_mapping() {
     echo "---------------------------------------"
     echo "Show OSD to Device Mapping"
@@ -792,17 +884,25 @@ show_osd_device_mapping() {
     ceph-volume lvm list
 }
 
-# Function to bulk create OSDs (placeholder for user customization)
+# Function to bulk create OSDs
 bulk_create_osds() {
     echo "---------------------------------------"
     echo "Bulk Create OSDs"
     echo "---------------------------------------"
     # This can be adapted to run a series of ceph-volume commands as per user input
-    read -p "Enter device class for bulk OSD creation: " BCLASS
-    read -p "Enter space-separated devices: " BULK_DEVICES
+    read -p "Enter device class for bulk OSD creation [default: $DEFAULT_CRUSH_CLASS]: " BCLASS_INPUT
+    BCLASS="${BCLASS_INPUT:-$DEFAULT_CRUSH_CLASS}"
+    read -p "Enter space-separated devices (e.g., sda sdb sdc): " BULK_DEVICES
+
+    # Confirm the destructive action
+    echo "You are about to zap and create OSDs on the following devices:"
+    echo "$BULK_DEVICES"
+    confirm_step "This will erase all data on these devices. Do you want to proceed?"
+
     for d in $BULK_DEVICES; do
-        run_cmd "ceph-volume lvm zap --destroy /dev/$d"
-        run_cmd "ceph-volume lvm create --data /dev/$d --dmcrypt --crush-device-class $BCLASS"
+        device="/dev/$d"
+        run_cmd "ceph-volume lvm zap --destroy $device"
+        run_cmd "ceph-volume lvm create --data $device --dmcrypt --crush-device-class $BCLASS"
     done
 }
 
@@ -854,7 +954,7 @@ while true; do
         12) create_crush_rules ;;
         13) check_cluster_health ;;
         14) show_osd_device_mapping ;;
-        15) 
+        15)
             echo "Exiting Ceph Army Knife."
             exit 0
             ;;
@@ -865,8 +965,4 @@ while true; do
 
     echo
     read -p "Press Enter to continue..."
-done
-
-while true; do
-    echo "---------------------------------------"
 done
