@@ -146,7 +146,7 @@ create_crush_and_ec() {
         if [ -n "$EC_RULE_NAME" ]; then
             add_cmd "ceph osd crush rule create-erasure $EC_RULE_NAME $EC_PROFILE"
         fi
-    }
+    fi
 }
 
 # Step 3: Create Pools
