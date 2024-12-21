@@ -646,7 +646,7 @@ remove_osds() {
                     echo "Deactivating logical volume: $lv_path"
                     run_cmd "lvchange -an $lv_path" "true"
                     echo "Removing logical volume: $lv_path"
-                    run_cmd "lvremove -f $lv_path" "true"
+                    run_cmd "lvremove --yes -f $lv_path" "true"
                 done
 
                 DM_NAMES=$(dmsetup ls --target crypt | grep "$VG_NAME" | awk '{print $1}')
@@ -659,10 +659,10 @@ remove_osds() {
                 run_cmd "vgchange -an $VG_NAME" "true"
 
                 echo "Removing VG $VG_NAME"
-                run_cmd "vgremove -f $VG_NAME" "true"
+                run_cmd "vgremove --yes -f $VG_NAME" "true"
 
                 echo "Removing PV label from $device"
-                run_cmd "pvremove --force --force $device" "true"
+                run_cmd "pvremove --yes --force --force $device" "true"
             else
                 echo "No VG found for $device"
             fi
@@ -675,20 +675,6 @@ remove_osds() {
     done
 
     echo "All specified OSDs have been processed."
-
-    echo "Verifying the status of remaining OSDs..."
-    current_osds=$(ceph osd ls)
-    for osd_id in $existing_osds; do
-        if [[ ! " ${osd_ids[@]} " =~ " ${osd_id} " ]]; then
-            osd_status=$(ceph osd metadata $osd_id | jq -r '.state')
-            if [ "$osd_status" != "up" ]; then
-                echo "OSD.$osd_id is not up. Attempting to start it."
-                systemctl start ceph-osd@${osd_id}
-            fi
-        fi
-    done
-
-    echo "OSD status verification completed."
 }
 
 # Function to perform LVM remediation on selected block devices
