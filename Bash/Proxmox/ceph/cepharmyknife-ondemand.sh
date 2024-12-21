@@ -26,6 +26,26 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# Ensure Bash version is 4 or higher (for associative arrays)
+if [[ ${BASH_VERSINFO[0]} -lt 4 ]]; then
+    echo "Error: This script requires Bash version 4 or higher."
+    exit 1
+fi
+
+# Check if jq is installed, if not, install it
+if ! command -v jq &> /dev/null
+then
+    echo "jq could not be found, installing..."
+    if [[ -x "$(command -v apt-get)" ]]; then
+        apt-get update && apt-get install -y jq
+    elif [[ -x "$(command -v yum)" ]]; then
+        yum install -y epel-release && yum install -y jq
+    else
+        echo "Package manager not found. Please install 'jq' manually."
+        exit 1
+    fi
+fi
+
 # Logging function
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "${LOGFILE}"
@@ -545,84 +565,112 @@ remove_osds() {
         exit 1
     fi
 
+    # Build OSD to device mapping using ceph-volume lvm list
+    declare -A OSD_DEVICE_MAP
+    ceph_volume_output=$(ceph-volume lvm list 2>/dev/null)
+    if [[ $? -ne 0 ]]; then
+        echo "Error: Failed to execute 'ceph-volume lvm list'. Ensure Ceph is installed and configured correctly."
+        exit 1
+    fi
+
+    current_osd=""
+    while IFS= read -r line; do
+        # Detect the start of a new OSD block
+        if [[ $line =~ ^=+\ osd\.([0-9]+)\ =+$ ]]; then
+            current_osd="${BASH_REMATCH[1]}"
+            continue
+        fi
+
+        # Extract the 'devices' field
+        if [[ $line =~ ^[[:space:]]+devices[[:space:]]+(.+) ]]; then
+            device_path="${BASH_REMATCH[1]}"
+            # Assign device to current_osd
+            if [[ -n "$current_osd" ]]; then
+                OSD_DEVICE_MAP["$current_osd"]="$device_path"
+            fi
+        fi
+    done <<< "$ceph_volume_output"
+
     existing_osds=$(ceph osd ls)
 
     for osd_id in "${osd_ids[@]}"; do
         echo "Processing OSD ID: $osd_id"
 
-        ceph osd out osd.${osd_id}
-        echo "OSD.${osd_id} marked out."
+        if ! echo "$existing_osds" | grep -qw "$osd_id"; then
+            echo "osd.$osd_id does not exist."
+        else
+            ceph osd out osd.${osd_id}
+            echo "OSD.${osd_id} marked out."
 
-        echo "Waiting for data to rebalance..."
-        while true; do
-            HEALTH=$(ceph health detail)
-            if ! echo "$HEALTH" | grep -qE "(recovery|degraded|backfill)"; then
-                echo "Data rebalanced."
-                break
-            else
-                echo "Cluster is rebalancing. Waiting..."
-                sleep 30
-            fi
-        done
+            echo "Waiting for data to rebalance..."
+            while true; do
+                HEALTH=$(ceph health detail)
+                if ! echo "$HEALTH" | grep -qE "(recovery|degraded|backfill)"; then
+                    echo "Data rebalanced."
+                    break
+                else
+                    echo "Cluster is rebalancing. Waiting..."
+                    sleep 30
+                fi
+            done
 
-        echo "Stopping OSD service for OSD.${osd_id}"
-        systemctl stop ceph-osd@${osd_id}
+            echo "Stopping OSD service for OSD.${osd_id}"
+            systemctl stop ceph-osd@${osd_id}
 
-        ceph osd crush remove osd.${osd_id}
-        echo "Removed OSD.${osd_id} from the CRUSH map."
+            ceph osd crush remove osd.${osd_id}
+            echo "Removed OSD.${osd_id} from the CRUSH map."
 
-        ceph auth del osd.${osd_id}
-        echo "Deleted authentication key for OSD.${osd_id}."
+            ceph auth del osd.${osd_id}
+            echo "Deleted authentication key for OSD.${osd_id}."
 
-        ceph osd rm ${osd_id}
-        echo "Removed OSD.${osd_id} from the OSD map."
+            ceph osd rm ${osd_id}
+            echo "Removed OSD.${osd_id} from the OSD map."
 
-        echo "OSD ID: $osd_id has been removed successfully."
+            echo "OSD ID: $osd_id has been removed successfully."
+        fi
 
         echo "Cleaning up LVM data for OSD.${osd_id}..."
-        OSD_DATA_PATH="/var/lib/ceph/osd/ceph-${osd_id}"
-        if [ -d "$OSD_DATA_PATH" ]; then
-            DEVICE=$(readlink -f $OSD_DATA_PATH/block)
-            if [ -n "$DEVICE" ]; then
-                DM_NAME=$(basename "$DEVICE")
-                # Check if the device mapping exists before attempting to close it
-                if dmsetup ls --target crypt | grep -qw "$DM_NAME"; then
-                    echo "Closing encrypted device mapping: $DM_NAME"
-                    run_cmd "cryptsetup luksClose $DM_NAME" "true"
-                else
-                    echo "Encrypted device mapping $DM_NAME is not active, skipping."
-                fi
 
-                LV_PATH=$(lvdisplay | grep -B1 "$DEVICE" | grep "LV Path" | awk '{print $3}')
-                if [ -n "$LV_PATH" ]; then
-                    echo "Deactivating logical volume: $LV_PATH"
-                    run_cmd "lvchange -an $LV_PATH" "true"
-                    echo "Removing logical volume: $LV_PATH"
-                    run_cmd "lvremove -f $LV_PATH" "true"
-                else
-                    echo "Could not find logical volume for $DEVICE or it has already been removed."
-                fi
+        # Get the device associated with this OSD ID
+        device="${OSD_DEVICE_MAP[$osd_id]}"
+        if [ -n "$device" ]; then
+            echo "Found device $device for OSD.${osd_id}"
 
-                VG_NAME=$(pvs --noheadings -o vg_name $DEVICE | tr -d ' ')
-                if [ -n "$VG_NAME" ]; then
-                    echo "Deactivating VG $VG_NAME associated with $DEVICE"
-                    run_cmd "vgchange -an $VG_NAME" "true"
-                    echo "Removing VG $VG_NAME"
-                    run_cmd "vgremove -f $VG_NAME" "true"
-                else
-                    echo "Could not find volume group for $DEVICE or it has already been removed."
-                fi
+            # Deactivate any LVM volumes on the device
+            VG_NAME=$(pvs --noheadings -o vg_name $device | tr -d ' ')
+            if [ -n "$VG_NAME" ]; then
+                echo "Found VG $VG_NAME on $device"
 
-                echo "Removing PV label from $DEVICE"
-                run_cmd "pvremove --force --force $DEVICE" "true"
+                LV_PATHS=$(lvs --noheadings -o lv_path $VG_NAME | tr -d ' ')
+                for lv_path in $LV_PATHS; do
+                    echo "Deactivating logical volume: $lv_path"
+                    run_cmd "lvchange -an $lv_path" "true"
+                    echo "Removing logical volume: $lv_path"
+                    run_cmd "lvremove -f $lv_path" "true"
+                done
 
-                echo "Zapping $DEVICE..."
-                run_cmd "ceph-volume lvm zap --destroy $DEVICE" "true"
+                DM_NAMES=$(dmsetup ls --target crypt | grep "$VG_NAME" | awk '{print $1}')
+                for dm_name in $DM_NAMES; do
+                    echo "Closing encrypted device mapping: $dm_name"
+                    run_cmd "cryptsetup luksClose $dm_name" "true"
+                done
+
+                echo "Deactivating VG $VG_NAME associated with $device"
+                run_cmd "vgchange -an $VG_NAME" "true"
+
+                echo "Removing VG $VG_NAME"
+                run_cmd "vgremove -f $VG_NAME" "true"
+
+                echo "Removing PV label from $device"
+                run_cmd "pvremove --force --force $device" "true"
             else
-                echo "Could not find block device for OSD.${osd_id}. Skipping LVM cleanup."
+                echo "No VG found for $device"
             fi
+
+            echo "Zapping $device..."
+            run_cmd "ceph-volume lvm zap --destroy $device" "true"
         else
-            echo "OSD data path $OSD_DATA_PATH does not exist. Skipping LVM cleanup."
+            echo "Could not find device mapping for OSD.${osd_id}. Skipping LVM cleanup."
         fi
     done
 
