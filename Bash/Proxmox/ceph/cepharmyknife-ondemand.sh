@@ -34,11 +34,14 @@ log() {
 # Function to run a command and handle errors
 run_cmd() {
     CMD="$1"
+    CONTINUE_ON_ERROR="$2"
     log "Running: $CMD"
     if ! eval "$CMD"; then
         log "ERROR: Command failed: $CMD"
         log "Please check the command output above for details."
-        exit 1
+        if [ "$CONTINUE_ON_ERROR" != "true" ]; then
+            exit 1
+        fi
     fi
 }
 
@@ -582,34 +585,39 @@ remove_osds() {
             DEVICE=$(readlink -f $OSD_DATA_PATH/block)
             if [ -n "$DEVICE" ]; then
                 DM_NAME=$(basename "$DEVICE")
-                echo "Closing encrypted device mapping: $DM_NAME"
-                run_cmd "cryptsetup luksClose $DM_NAME"
+                # Check if the device mapping exists before attempting to close it
+                if dmsetup ls --target crypt | grep -qw "$DM_NAME"; then
+                    echo "Closing encrypted device mapping: $DM_NAME"
+                    run_cmd "cryptsetup luksClose $DM_NAME" "true"
+                else
+                    echo "Encrypted device mapping $DM_NAME is not active, skipping."
+                fi
 
                 LV_PATH=$(lvdisplay | grep -B1 "$DEVICE" | grep "LV Path" | awk '{print $3}')
                 if [ -n "$LV_PATH" ]; then
                     echo "Deactivating logical volume: $LV_PATH"
-                    run_cmd "lvchange -an $LV_PATH"
+                    run_cmd "lvchange -an $LV_PATH" "true"
                     echo "Removing logical volume: $LV_PATH"
-                    run_cmd "lvremove -f $LV_PATH"
+                    run_cmd "lvremove -f $LV_PATH" "true"
                 else
-                    echo "Could not find logical volume for $DEVICE"
+                    echo "Could not find logical volume for $DEVICE or it has already been removed."
                 fi
 
                 VG_NAME=$(pvs --noheadings -o vg_name $DEVICE | tr -d ' ')
                 if [ -n "$VG_NAME" ]; then
                     echo "Deactivating VG $VG_NAME associated with $DEVICE"
-                    run_cmd "vgchange -an $VG_NAME"
+                    run_cmd "vgchange -an $VG_NAME" "true"
                     echo "Removing VG $VG_NAME"
-                    run_cmd "vgremove -f $VG_NAME"
+                    run_cmd "vgremove -f $VG_NAME" "true"
                 else
-                    echo "Could not find volume group for $DEVICE"
+                    echo "Could not find volume group for $DEVICE or it has already been removed."
                 fi
 
                 echo "Removing PV label from $DEVICE"
-                run_cmd "pvremove --force --force $DEVICE"
+                run_cmd "pvremove --force --force $DEVICE" "true"
 
                 echo "Zapping $DEVICE..."
-                run_cmd "ceph-volume lvm zap --destroy $DEVICE"
+                run_cmd "ceph-volume lvm zap --destroy $DEVICE" "true"
             else
                 echo "Could not find block device for OSD.${osd_id}. Skipping LVM cleanup."
             fi
