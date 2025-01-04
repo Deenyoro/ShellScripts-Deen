@@ -1,6 +1,6 @@
 #!/bin/bash
 ################################################################################
-# Ceph OSD Match Script with Comprehensive Documentation and Dual Modes
+# Ceph OSD Match Script
 #
 # Description:
 #   This script, named `cephosdmatch.sh`, is designed to map Ceph OSD (Object
@@ -46,14 +46,14 @@
 #
 # Usage:
 #   1) **Run without arguments** for **interactive mode**:
-#        sudo ./cephosdmatch.sh
+#        ./cephosdmatch.sh
 #      - You will be prompted for:
 #          - Output format (text or csv).
 #          - Output to terminal or file.
 #          - Filename if file is chosen.
 #
 #   2) **Run with arguments** for **command-line mode**:
-#        sudo ./cephosdmatch.sh [-o text|csv] [-f <filename>] [-h]
+#        ./cephosdmatch.sh [-o text|csv] [-f <filename>] [-h]
 #
 #      Options:
 #         -o <format>      : Output format ('text' or 'csv'), default 'text'.
@@ -61,16 +61,16 @@
 #         -h               : Show help/usage message.
 #
 #      Examples:
-#         sudo ./cephosdmatch.sh -o text
+#         ./cephosdmatch.sh -o text
 #           -> Output is text, to terminal by default (since -f is not given).
 #
-#         sudo ./cephosdmatch.sh -o csv -f /tmp/custom_osd_mapping.csv
+#         ./cephosdmatch.sh -o csv -f /tmp/custom_osd_mapping.csv
 #           -> Output is CSV, saved to /tmp/custom_osd_mapping.csv.
 #
 # Requirements:
-#   - Bash 4.0+ (check via `bash --version`)
+#   - Bash 4.0+
 #   - `ceph` and `ceph-volume` installed and configured
-#   - `lsblk` command available (commonly part of `util-linux`)
+#   - `lsblk` command available
 #
 ################################################################################
 
