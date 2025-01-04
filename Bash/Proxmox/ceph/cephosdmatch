@@ -1,229 +1,422 @@
 #!/bin/bash
-
 ################################################################################
-# Ceph OSD Match Script with Comprehensive Documentation
+# Ceph OSD Match Script with Comprehensive Documentation and Dual Modes
 #
 # Description:
-#   This script, named `cephosdmatch.sh`, is designed to map Ceph OSD (Object Storage Daemon)
-#   IDs to their corresponding physical drive information. It gathers details such as
-#   device path, size, filesystem type, serial number, and WWN (World Wide Name) for
-#   each OSD. This mapping is crucial for administrators to understand the physical
-#   layout of their Ceph cluster and to perform maintenance or troubleshooting tasks
-#   effectively.
+#   This script, named `cephosdmatch.sh`, is designed to map Ceph OSD (Object
+#   Storage Daemon) IDs to their corresponding physical drive information. It
+#   gathers details such as:
+#     - device path
+#     - size
+#     - filesystem type
+#     - serial number
+#     - WWN (World Wide Name)
+#     - model
+#
+#   Having this mapping is crucial for understanding the physical layout of a
+#   Ceph cluster and effectively performing maintenance or troubleshooting.
 #
 # Features:
-#   - **Bash Version Check:** Ensures that the script is running on Bash version 4 or higher,
-#     which is required for the use of associative arrays.
-#   - **Header Printing:** Defines a function to print a neatly formatted header for the output table.
-#   - **Information Gathering:**
-#       - **Ceph OSD Mapping:** Uses `ceph-volume lvm list` to retrieve the mapping between OSD IDs
-#         and their respective device paths.
-#       - **System Device Information:** Utilizes `lsblk` to gather detailed information about
-#         each block device, including size, filesystem type, serial number, and WWN.
-#   - **Data Parsing and Storage:**
-#       - **Associative Arrays:** Employs associative arrays to store and relate OSD IDs to device paths
-#         and device attributes.
-#       - **Parsing Logic:** Extracts relevant data from the outputs of `ceph-volume lvm list` and `lsblk`.
-#   - **Output Generation:** Compiles and displays a comprehensive table that maps each OSD ID to
-#     its physical device details.
+#   - **Dual Modes**:
+#       1) **Interactive Mode** (if the script is run with no arguments):
+#          - Prompt for output format (text or CSV). [Enter => text]
+#          - Prompt to choose output to terminal or to a file. [Enter => terminal]
+#          - If saving to file, prompt for filename (with defaults).
+#       2) **Command-Line Mode** (if run with options):
+#          - `-o text|csv` chooses output format (default "text" if omitted).
+#          - `-f <filename>` sets a custom filename. If omitted => output to terminal.
+#          - `-h` displays help/usage instructions.
+#
+#   - **Bash Version Check**: Requires Bash 4.0 or higher for associative arrays.
+#
+#   - **Ceph OSD Mapping**: Uses `ceph-volume lvm list` to find OSD IDs and map
+#     them to their device paths.
+#
+#   - **System Device Information**: Uses `lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT,
+#     SERIAL,WWN,MODEL -P` to retrieve size, filesystem type, serial number, WWN,
+#     and model for each block device.
+#
+#   - **Model Field**: The model of each device is captured and included in the
+#     output.
+#
+#   - **Output Generation**:
+#       - **Text**: Prints a tabular output with columns: OSD_ID, DEVICE_PATH,
+#         SIZE, FSTYPE, SERIAL, WWN, MODEL.
+#       - **CSV**: Prints comma-separated lines with the same columns.
 #
 # Usage:
-#   1. **Ensure Script Permissions:**
-#        Make sure the script has execute permissions.
-#        ```bash
-#        chmod +x cephosdmatch.sh
-#        ```
-#
-#   2. **Run the Script as Root:**
-#        Execute the script with root privileges to ensure it can access all necessary device information.
-#        ```bash
+#   1) **Run without arguments** for **interactive mode**:
 #        sudo ./cephosdmatch.sh
-#        ```
+#      - You will be prompted for:
+#          - Output format (text or csv).
+#          - Output to terminal or file.
+#          - Filename if file is chosen.
 #
-#   3. **Review the Output:**
-#        The script will display a table with the following columns:
-#          - **OSD_ID:** The unique identifier for each Ceph OSD.
-#          - **DEVICE_PATH:** The filesystem path to the physical device (e.g., /dev/sdi).
-#          - **SIZE:** The size of the device.
-#          - **FSTYPE:** The filesystem type on the device.
-#          - **SERIAL:** The serial number of the device.
-#          - **WWN:** The World Wide Name of the device.
+#   2) **Run with arguments** for **command-line mode**:
+#        sudo ./cephosdmatch.sh [-o text|csv] [-f <filename>] [-h]
+#
+#      Options:
+#         -o <format>      : Output format ('text' or 'csv'), default 'text'.
+#         -f <filename>    : Write to <filename> (if omitted => output to terminal).
+#         -h               : Show help/usage message.
+#
+#      Examples:
+#         sudo ./cephosdmatch.sh -o text
+#           -> Output is text, to terminal by default (since -f is not given).
+#
+#         sudo ./cephosdmatch.sh -o csv -f /tmp/custom_osd_mapping.csv
+#           -> Output is CSV, saved to /tmp/custom_osd_mapping.csv.
 #
 # Requirements:
-#   - **Bash Version 4 or Higher:** Necessary for using associative arrays.
-#   - **Ceph CLI Tools:** `ceph` and `ceph-volume` must be installed and properly configured.
-#   - **System Utilities:** Tools like `lsblk`, `pvs`, `lvs`, `vgremove`, `lvremove`,
-#     `pvremove`, `cryptsetup`, `lsof`, `umount`, and `wipefs` should be available.
+#   - Bash 4.0+ (check via `bash --version`)
+#   - `ceph` and `ceph-volume` installed and configured
+#   - `lsblk` command available (commonly part of `util-linux`)
 #
 ################################################################################
 
-# -----------------------------------------------------------------------------
-# Ensure Bash version is 4 or higher for associative arrays
-# -----------------------------------------------------------------------------
+################################################################################
+# 1. Ensure Bash version is 4 or higher
+################################################################################
 if [[ ${BASH_VERSINFO[0]} -lt 4 ]]; then
     echo "Error: This script requires Bash version 4.0 or higher."
     exit 1
 fi
 
-# -----------------------------------------------------------------------------
-# Function: print_header
-# Description: Prints the header for the output table with formatted columns.
-# -----------------------------------------------------------------------------
-print_header() {
-    printf "%-6s %-60s %-8s %-12s %-20s %-20s\n" \
-        "OSD_ID" "DEVICE_PATH" "SIZE" "FSTYPE" "SERIAL" "WWN"
-    printf "%-6s %-60s %-8s %-12s %-20s %-20s\n" \
-        "------" "-----------" "----" "------" "------" "----"
+################################################################################
+# 2. Parse Command-Line Arguments (if any)
+################################################################################
+
+OUTPUT_FORMAT=""
+OUTPUT_FILENAME=""
+MODE="interactive"  # Default: if no arguments, we remain in interactive mode
+
+print_usage() {
+    echo "Usage: $0 [-o text|csv] [-f <filename>] [-h]"
+    echo
+    echo "Options:"
+    echo "  -o <format>   Specify output format ('text' or 'csv')."
+    echo "  -f <filename> Write to <filename> (if omitted => print to terminal)."
+    echo "  -h            Show this help message."
 }
 
-# -----------------------------------------------------------------------------
-# Capture command outputs into variables
-# Description:
-#   - `ceph-volume lvm list`: Retrieves the mapping between OSD IDs and device paths.
-#   - `lsblk`: Gathers detailed information about each block device.
-# -----------------------------------------------------------------------------
+if [[ $# -gt 0 ]]; then
+    # We have some arguments, so go into command-line mode
+    MODE="cmdline"
+    while getopts ":o:f:h" opt; do
+        case $opt in
+            o)
+                if [[ "$OPTARG" == "text" || "$OPTARG" == "csv" ]]; then
+                    OUTPUT_FORMAT="$OPTARG"
+                else
+                    echo "Error: Invalid value for -o. Use 'text' or 'csv'."
+                    exit 1
+                fi
+                ;;
+            f)
+                OUTPUT_FILENAME="$OPTARG"
+                ;;
+            h)
+                print_usage
+                exit 0
+                ;;
+            \?)
+                echo "Error: Invalid option '-$OPTARG'."
+                print_usage
+                exit 1
+                ;;
+        esac
+    done
+fi
+
+################################################################################
+# 3. Interactive Mode: Prompt if no arguments
+################################################################################
+if [[ "$MODE" == "interactive" ]]; then
+    # Prompt for output format
+    echo "Select output format:"
+    echo "1) Text"
+    echo "2) CSV"
+    read -p "Enter your choice (1 or 2) [Press Enter for Text]: " choice
+
+    if [[ -z "$choice" || "$choice" != "2" ]]; then
+        OUTPUT_FORMAT="text"
+    else
+        OUTPUT_FORMAT="csv"
+    fi
+
+    # Prompt how to output: terminal or file
+    echo ""
+    echo "How do you want to output the data?"
+    echo "1) Display on terminal"
+    echo "2) Save to a file"
+    read -p "Enter your choice (1 or 2) [Press Enter for terminal]: " out_choice
+
+    if [[ -z "$out_choice" || "$out_choice" != "2" ]]; then
+        # Terminal output
+        OUTPUT_FILENAME=""  # indicates "no file => just print to terminal"
+    else
+        # Save to file => prompt for filename
+        if [[ "$OUTPUT_FORMAT" == "csv" ]]; then
+            read -p "Enter filename/path [Press Enter for 'ceph_osd_mapping.csv']: " csv_filename
+            OUTPUT_FILENAME=${csv_filename:-ceph_osd_mapping.csv}
+        else
+            read -p "Enter filename/path [Press Enter for 'ceph_osd_mapping.txt']: " txt_filename
+            OUTPUT_FILENAME=${txt_filename:-ceph_osd_mapping.txt}
+        fi
+        echo "Will save output to: $OUTPUT_FILENAME"
+    fi
+fi
+
+################################################################################
+# 4. Apply Command-Line Defaults (if in cmdline mode and user left things blank)
+################################################################################
+if [[ "$MODE" == "cmdline" ]]; then
+    # If user didn't specify -o, default to text
+    if [[ -z "$OUTPUT_FORMAT" ]]; then
+        OUTPUT_FORMAT="text"
+    fi
+
+    # If user didn't specify -f, print to terminal (empty OUTPUT_FILENAME)
+    if [[ -z "$OUTPUT_FILENAME" ]]; then
+        OUTPUT_FILENAME=""
+    fi
+fi
+
+################################################################################
+# 5. Display Final Choices
+################################################################################
+echo "-------------------------------------------------"
+echo "Mode:            $MODE"
+echo "Output Format:   $OUTPUT_FORMAT"
+if [[ -n "$OUTPUT_FILENAME" ]]; then
+    echo "Output to File:  $OUTPUT_FILENAME"
+else
+    echo "Output:          Terminal"
+fi
+echo "-------------------------------------------------"
+
+################################################################################
+# 6. Gather Data from Ceph and System
+################################################################################
 echo "Fetching Ceph and system information. Please wait..."
 
-# Get OSD to device mapping from 'ceph-volume lvm list'
 ceph_volume_output=$(ceph-volume lvm list 2>/dev/null)
 if [[ $? -ne 0 ]]; then
-    echo "Error: Failed to execute 'ceph-volume lvm list'. Ensure Ceph is installed and configured correctly."
+    echo "Error: Failed to execute 'ceph-volume lvm list'."
+    echo "       Ensure Ceph is installed and configured correctly."
     exit 1
 fi
 
-# Get device info from 'lsblk', including SERIAL and WWN
-lsblk_output=$(lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT,SERIAL,WWN -P 2>/dev/null)
+lsblk_output=$(lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT,SERIAL,WWN,MODEL -P 2>/dev/null)
 if [[ $? -ne 0 ]]; then
-    echo "Error: Failed to execute 'lsblk'. Ensure lsblk is installed and accessible."
+    echo "Error: Failed to execute 'lsblk'. Ensure 'lsblk' is installed and accessible."
     exit 1
 fi
 
-# -----------------------------------------------------------------------------
-# Declare associative arrays to store parsed data
-# Description:
-#   - `OSD_DEVICE`: Maps OSD IDs to their device paths.
-#   - `LSBLK_SIZE`: Maps device names to their sizes.
-#   - `LSBLK_FSTYPE`: Maps device names to their filesystem types.
-#   - `LSBLK_SERIAL`: Maps device names to their serial numbers.
-#   - `LSBLK_WWN`: Maps device names to their WWNs.
-# -----------------------------------------------------------------------------
-declare -A OSD_DEVICE         # OSD ID -> Device Path
-declare -A LSBLK_SIZE         # Device Name -> Size
-declare -A LSBLK_FSTYPE       # Device Name -> Filesystem Type
-declare -A LSBLK_SERIAL       # Device Name -> Serial Number
-declare -A LSBLK_WWN          # Device Name -> WWN
+################################################################################
+# 7. Declare Associative Arrays
+################################################################################
+declare -A OSD_DEVICE     # OSD ID -> Device Path
+declare -A LSBLK_SIZE     # Device Name -> Size
+declare -A LSBLK_FSTYPE   # Device Name -> Filesystem Type
+declare -A LSBLK_SERIAL   # Device Name -> Serial Number
+declare -A LSBLK_WWN      # Device Name -> WWN
+declare -A LSBLK_MODEL    # Device Name -> Model
 
-# -----------------------------------------------------------------------------
-# Parse 'ceph-volume lvm list' output to extract OSD IDs and Device Paths
-# Description:
-#   Iterates through the output of `ceph-volume lvm list` to map each OSD ID
-#   to its corresponding device path. Handles multiple devices per OSD if present.
-# -----------------------------------------------------------------------------
+################################################################################
+# 8. Parse 'ceph-volume lvm list' for OSD ID -> Device Path
+################################################################################
 echo "Debug: Parsing 'ceph-volume lvm list' output..."
 current_osd=""
 while IFS= read -r line; do
-    # Detect the start of a new OSD block with flexible '=' count
+    # Detect lines that start a new OSD block, e.g. "==== osd.1 ===="
     if [[ $line =~ ^=+\ osd\.([0-9]+)\ =+$ ]]; then
         current_osd="${BASH_REMATCH[1]}"
         echo "Debug: Processing OSD ID $current_osd"
         continue
     fi
 
-    # Extract the 'devices' field with flexible leading spaces
+    # Detect lines that define the 'devices' field (with leading whitespace)
     if [[ $line =~ ^[[:space:]]+devices[[:space:]]+(.+) ]]; then
         device_path="${BASH_REMATCH[1]}"
-        # Assign device to current_osd
         if [[ -n "$current_osd" ]]; then
             if [[ -z "${OSD_DEVICE[$current_osd]}" ]]; then
                 OSD_DEVICE["$current_osd"]="$device_path"
                 echo "Debug: OSD ID $current_osd mapped to device $device_path"
             else
-                echo "Warning: OSD ID $current_osd already mapped to device ${OSD_DEVICE[$current_osd]}, skipping additional device $device_path"
+                echo "Warning: OSD ID $current_osd already mapped to '${OSD_DEVICE[$current_osd]}'. Skipping additional device '$device_path'."
             fi
         else
-            echo "Warning: Found device '$device_path' without a corresponding OSD ID. Skipping."
+            echo "Warning: Found device '$device_path' but no current OSD ID. Skipping."
         fi
     fi
 done <<< "$ceph_volume_output"
 
-# -----------------------------------------------------------------------------
-# Parse 'lsblk' output to extract device size, fstype, serial, wwn
-# Description:
-#   Processes the output of `lsblk` to populate the associative arrays with
-#   device attributes for later mapping.
-# -----------------------------------------------------------------------------
+################################################################################
+# 9. Parse 'lsblk' Output for Device Info
+################################################################################
 echo "Debug: Parsing 'lsblk' output..."
 while IFS= read -r line; do
-    # Extract NAME, SIZE, FSTYPE, MOUNTPOINT, SERIAL, WWN from lsblk
-    NAME=$(echo "$line" | grep -oP 'NAME="\K[^"]+')
-    SIZE=$(echo "$line" | grep -oP 'SIZE="\K[^"]+')
+    NAME=$(echo "$line"   | grep -oP 'NAME="\K[^"]+')
+    SIZE=$(echo "$line"   | grep -oP 'SIZE="\K[^"]+')
     FSTYPE=$(echo "$line" | grep -oP 'FSTYPE="\K[^"]+')
-    MOUNTPOINT=$(echo "$line" | grep -oP 'MOUNTPOINT="\K[^"]*')
     SERIAL=$(echo "$line" | grep -oP 'SERIAL="\K[^"]+')
-    WWN=$(echo "$line" | grep -oP 'WWN="\K[^"]+')
+    WWN=$(echo "$line"    | grep -oP 'WWN="\K[^"]+')
+    MODEL=$(echo "$line"  | grep -oP 'MODEL="\K[^"]+')
 
-    LSBLK_SIZE["$NAME"]="$SIZE"
+    LSBLK_SIZE["$NAME"]="${SIZE:-N/A}"
     LSBLK_FSTYPE["$NAME"]="${FSTYPE:-N/A}"
     LSBLK_SERIAL["$NAME"]="${SERIAL:-N/A}"
     LSBLK_WWN["$NAME"]="${WWN:-N/A}"
+    LSBLK_MODEL["$NAME"]="${MODEL:-N/A}"
 done <<< "$lsblk_output"
 
-# -----------------------------------------------------------------------------
-# Function: get_device_info
-# Description:
-#   Given a device path, retrieves its size, filesystem type, serial number, and WWN
-#   from the parsed `lsblk` data. Returns 'N/A' if any information is missing.
-# -----------------------------------------------------------------------------
+################################################################################
+# 10. Helper to Retrieve Device Info for a Given /dev/XXX
+################################################################################
 get_device_info() {
     local device_path="$1"
-    # Extract the device name from the device path, e.g., /dev/sdi -> sdi
-    device_name=$(basename "$device_path")
-    size="${LSBLK_SIZE[$device_name]:-N/A}"
-    fstype="${LSBLK_FSTYPE[$device_name]:-N/A}"
-    serial="${LSBLK_SERIAL[$device_name]:-N/A}"
-    wwn="${LSBLK_WWN[$device_name]:-N/A}"
-    echo "$size" "$fstype" "$serial" "$wwn"
+    local device_name
+    device_name=$(basename "$device_path")  # e.g. /dev/sda -> sda
+
+    local size="${LSBLK_SIZE[$device_name]:-N/A}"
+    local fstype="${LSBLK_FSTYPE[$device_name]:-N/A}"
+    local serial="${LSBLK_SERIAL[$device_name]:-N/A}"
+    local wwn="${LSBLK_WWN[$device_name]:-N/A}"
+    local model="${LSBLK_MODEL[$device_name]:-N/A}"
+
+    echo "$size" "$fstype" "$serial" "$wwn" "$model"
 }
 
-# -----------------------------------------------------------------------------
-# Function: print_mapping
-# Description:
-#   Prints the mapping of OSDs to their device information in a formatted table.
-#   Improvement: Sort OSD IDs numerically to ensure a consistent order of output.
-#   Improvement: If no OSDs found, print a notification.
-# -----------------------------------------------------------------------------
-print_mapping() {
-    print_header
+################################################################################
+# 11. Functions for Output
+################################################################################
 
-    # Sort OSD IDs numerically for consistent output order
-    osd_ids=($(printf "%s\n" "${!OSD_DEVICE[@]}" | sort -n))
+# Print the table header for text output
+print_header_text() {
+    printf "%-6s %-60s %-8s %-12s %-20s %-20s %-20s\n" \
+        "OSD_ID" "DEVICE_PATH" "SIZE" "FSTYPE" "SERIAL" "WWN" "MODEL"
+    printf "%-6s %-60s %-8s %-12s %-20s %-20s %-20s\n" \
+        "------" "-----------" "----" "------" "------" "----" "-----"
+}
 
-    # If no OSD mappings found, inform the user
-    if [ ${#osd_ids[@]} -eq 0 ]; then
-        echo "No OSD mappings found. Ensure that 'ceph-volume lvm list' returned valid data."
+# Generate text output to stdout
+print_mapping_text_stdout() {
+    print_header_text
+    local osd_ids=($(printf "%s\n" "${!OSD_DEVICE[@]}" | sort -n))
+    if [[ ${#osd_ids[@]} -eq 0 ]]; then
+        echo "No OSD mappings found. Ensure 'ceph-volume lvm list' returned valid data."
         return
     fi
 
     for osd_id in "${osd_ids[@]}"; do
-        device_path="${OSD_DEVICE[$osd_id]}"
-        read -r size fstype serial wwn <<< "$(get_device_info "$device_path")"
-
-        # Print the mapping
-        printf "%-6s %-60s %-8s %-12s %-20s %-20s\n" \
-            "$osd_id" "$device_path" "$size" "$fstype" "$serial" "$wwn"
+        local device_path="${OSD_DEVICE[$osd_id]}"
+        read -r size fstype serial wwn model <<< "$(get_device_info "$device_path")"
+        printf "%-6s %-60s %-8s %-12s %-20s %-20s %-20s\n" \
+            "$osd_id" "$device_path" "$size" "$fstype" "$serial" "$wwn" "$model"
     done
 
-    # Additional improvement: Print a summary line
     echo "Total OSDs mapped: ${#osd_ids[@]}"
 }
 
-# -----------------------------------------------------------------------------
-# Execute the mapping and print the results
-# Description:
-#   Calls the print_mapping function to display the OSD to device mappings.
-# -----------------------------------------------------------------------------
-print_mapping
+# Generate text output to file
+write_mapping_text_file() {
+    {
+        print_header_text
+        local osd_ids=($(printf "%s\n" "${!OSD_DEVICE[@]}" | sort -n))
+        if [[ ${#osd_ids[@]} -eq 0 ]]; then
+            echo "No OSD mappings found. Ensure 'ceph-volume lvm list' returned valid data."
+            return
+        fi
 
-# -----------------------------------------------------------------------------
-# End of Script
-# -----------------------------------------------------------------------------
+        for osd_id in "${osd_ids[@]}"; do
+            local device_path="${OSD_DEVICE[$osd_id]}"
+            read -r size fstype serial wwn model <<< "$(get_device_info "$device_path")"
+            printf "%-6s %-60s %-8s %-12s %-20s %-20s %-20s\n" \
+                "$osd_id" "$device_path" "$size" "$fstype" "$serial" "$wwn" "$model"
+        done
+
+        echo "Total OSDs mapped: ${#osd_ids[@]}"
+    } > "$OUTPUT_FILENAME"
+}
+
+# Generate CSV output to stdout
+print_mapping_csv_stdout() {
+    echo "OSD_ID,DEVICE_PATH,SIZE,FSTYPE,SERIAL,WWN,MODEL"
+    local osd_ids=($(printf "%s\n" "${!OSD_DEVICE[@]}" | sort -n))
+    if [[ ${#osd_ids[@]} -eq 0 ]]; then
+        echo "No OSD mappings found. Ensure 'ceph-volume lvm list' returned valid data."
+        return
+    fi
+
+    for osd_id in "${osd_ids[@]}"; do
+        local device_path="${OSD_DEVICE[$osd_id]}"
+        read -r size fstype serial wwn model <<< "$(get_device_info "$device_path")"
+
+        # Escape commas
+        device_path_escaped=$(echo "$device_path" | sed 's/,/\\,/g')
+        size_escaped=$(echo "$size" | sed 's/,/\\,/g')
+        fstype_escaped=$(echo "$fstype" | sed 's/,/\\,/g')
+        serial_escaped=$(echo "$serial" | sed 's/,/\\,/g')
+        wwn_escaped=$(echo "$wwn" | sed 's/,/\\,/g')
+        model_escaped=$(echo "$model" | sed 's/,/\\,/g')
+
+        echo "$osd_id,$device_path_escaped,$size_escaped,$fstype_escaped,$serial_escaped,$wwn_escaped,$model_escaped"
+    done
+}
+
+# Generate CSV output to file
+write_mapping_csv_file() {
+    {
+        echo "OSD_ID,DEVICE_PATH,SIZE,FSTYPE,SERIAL,WWN,MODEL"
+        local osd_ids=($(printf "%s\n" "${!OSD_DEVICE[@]}" | sort -n))
+        if [[ ${#osd_ids[@]} -eq 0 ]]; then
+            echo "No OSD mappings found. Ensure 'ceph-volume lvm list' returned valid data."
+            return
+        fi
+
+        for osd_id in "${osd_ids[@]}"; do
+            local device_path="${OSD_DEVICE[$osd_id]}"
+            read -r size fstype serial wwn model <<< "$(get_device_info "$device_path")"
+
+            # Escape commas
+            device_path_escaped=$(echo "$device_path" | sed 's/,/\\,/g')
+            size_escaped=$(echo "$size" | sed 's/,/\\,/g')
+            fstype_escaped=$(echo "$fstype" | sed 's/,/\\,/g')
+            serial_escaped=$(echo "$serial" | sed 's/,/\\,/g')
+            wwn_escaped=$(echo "$wwn" | sed 's/,/\\,/g')
+            model_escaped=$(echo "$model" | sed 's/,/\\,/g')
+
+            echo "$osd_id,$device_path_escaped,$size_escaped,$fstype_escaped,$serial_escaped,$wwn_escaped,$model_escaped"
+        done
+    } > "$OUTPUT_FILENAME"
+}
+
+################################################################################
+# 12. Produce the Output
+################################################################################
+
+if [[ "$OUTPUT_FORMAT" == "csv" ]]; then
+    if [[ -n "$OUTPUT_FILENAME" ]]; then
+        echo "Generating CSV output to file: '$OUTPUT_FILENAME'..."
+        write_mapping_csv_file
+        echo "Done. CSV file saved as '$OUTPUT_FILENAME'."
+    else
+        echo "Generating CSV output to terminal..."
+        print_mapping_csv_stdout
+        echo "Done."
+    fi
+else
+    # OUTPUT_FORMAT == "text"
+    if [[ -n "$OUTPUT_FILENAME" ]]; then
+        echo "Generating text output to file: '$OUTPUT_FILENAME'..."
+        write_mapping_text_file
+        echo "Done. Text file saved as '$OUTPUT_FILENAME'."
+    else
+        echo "Generating text output to terminal..."
+        print_mapping_text_stdout
+        echo "Done."
+    fi
+fi
+
+# End of script
