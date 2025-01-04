@@ -75,10 +75,28 @@
 ################################################################################
 
 ################################################################################
-# 1. Ensure Bash version is 4 or higher
+# 1. Ensure Bash version is 4 or higher and required commands are available
 ################################################################################
 if [[ ${BASH_VERSINFO[0]} -lt 4 ]]; then
     echo "Error: This script requires Bash version 4.0 or higher."
+    exit 1
+fi
+
+# Check if `ceph` is installed
+if ! command -v ceph >/dev/null 2>&1; then
+    echo "Error: 'ceph' command is not installed or not in PATH. Please install Ceph tools."
+    exit 1
+fi
+
+# Check if `ceph-volume` is installed
+if ! command -v ceph-volume >/dev/null 2>&1; then
+    echo "Error: 'ceph-volume' command is not installed or not in PATH. Please install Ceph tools."
+    exit 1
+fi
+
+# Check if `lsblk` is installed
+if ! command -v lsblk >/dev/null 2>&1; then
+    echo "Error: 'lsblk' command is not installed or not in PATH. Please install util-linux."
     exit 1
 fi
 
@@ -407,7 +425,6 @@ if [[ "$OUTPUT_FORMAT" == "csv" ]]; then
         echo "Done."
     fi
 else
-    # OUTPUT_FORMAT == "text"
     if [[ -n "$OUTPUT_FILENAME" ]]; then
         echo "Generating text output to file: '$OUTPUT_FILENAME'..."
         write_mapping_text_file
@@ -418,5 +435,3 @@ else
         echo "Done."
     fi
 fi
-
-# End of script
