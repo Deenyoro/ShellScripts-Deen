@@ -256,14 +256,13 @@ function select_disk_storage() {
     echo "$chosen_storage"
 }
 
-function select_usb_storage() {
+function select_config_storage() {
     local title="$1"
     local prompt="$2"
 
     local menu_items=()
-    # We look for storages that can hold 'images' because a USB image is effectively just a VM disk
+    # We look for storages that can hold ISOs
     while IFS= read -r line; do
-        # pvesm status -content images => storages that can store VM disk images
         [[ -z "$line" || "$line" =~ ^Name ]] && continue
 
         local tag=$(echo "$line" | awk '{print $1}')
@@ -274,20 +273,20 @@ function select_usb_storage() {
 
         local item="Type: $stype, Free: ${free}B"
         menu_items+=("$tag" "$item")
-    done < <(pvesm status -content images)
+    done < <(pvesm status -content iso)
 
     if [ ${#menu_items[@]} -eq 0 ]; then
-        msg_error "No valid storage found for storing a USB disk image. Exiting..."
+        msg_error "No valid storage found for storing configuration ISO. Exiting..."
         exit 1
     fi
 
-    local chosen_usb_storage
-    chosen_usb_storage=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+    local chosen_config_storage
+    chosen_config_storage=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --title "$title" \
         --menu "$prompt" 16 70 8 \
         "${menu_items[@]}" 3>&1 1>&2 2>&3) || exit_script
 
-    echo "$chosen_usb_storage"
+    echo "$chosen_config_storage"
 }
 
 #################################################################################
@@ -1265,20 +1264,20 @@ function interactive_mount_config() {
         fi
     done
 
-    # 3) Prompt for USB label, default to "CONFIG" (uppercase enforced)
+    # 3) Prompt for config label, default to "CONFIG" (uppercase enforced)
     while true; do
-        USB_LABEL=$(whiptail \
+        CONFIG_LABEL=$(whiptail \
             --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Enter the volume label for the FAT32 USB image:" \
+            --inputbox "Enter the volume label for the configuration ISO:" \
             10 60 "CONFIG" \
-            --title "USB LABEL" \
+            --title "CONFIG LABEL" \
             --cancel-button "Exit Script" \
             3>&1 1>&2 2<&3) || exit_script
 
-        USB_LABEL=$(echo "$USB_LABEL" | tr '[:lower:]' '[:upper:]')
+        CONFIG_LABEL=$(echo "$CONFIG_LABEL" | tr '[:lower:]' '[:upper:]')
 
-        if [[ -n "$USB_LABEL" ]]; then
-            msg_ok "USB volume label set to '$USB_LABEL'."
+        if [[ -n "$CONFIG_LABEL" ]]; then
+            msg_ok "Configuration ISO label set to '$CONFIG_LABEL'."
             break
         else
             msg_error "Volume label cannot be empty. Please try again."
@@ -1286,9 +1285,8 @@ function interactive_mount_config() {
     done
 
     # 4) Ask which storage to use for the USB (images)
-    USB_STORAGE=$(select_usb_storage "Storage Pools" "Which storage pool would you like to use for the USB image?")
+    CONFIG_STORAGE=$(select_config_storage "Configuration Storage Location" "Which storage pool should the config image be created in?")
 
-    # 5) Now proceed to actually create the USB image and attach
     create_and_attach_config
 }
 
@@ -1309,9 +1307,9 @@ function create_and_attach_config() {
     fi
 
     # Create the ISO
-    msg_info "Creating ISO image..."
-    if ! genisoimage -o "${work_dir}/${iso_name}" -V "${USB_LABEL}" -r -J "${work_dir}"; then
-        msg_error "Failed to create ISO image"
+    msg_info "Creating config image..."
+    if ! genisoimage -o "${work_dir}/${iso_name}" -V "${CONFIG_LABEL}" -r -J "${work_dir}"; then
+        msg_error "Failed to create configuration ISO"
         rm -rf "${work_dir}"
         exit 1
     fi
@@ -1327,7 +1325,7 @@ function create_and_attach_config() {
     mkdir -p "$iso_storage_path"
     
     if ! mv "${work_dir}/${iso_name}" "${iso_storage_path}/${iso_name}"; then
-        msg_error "Failed to move ISO to storage"
+        msg_error "Failed to move config image to storage"
         rm -rf "${work_dir}"
         exit 1
     fi
@@ -1335,14 +1333,14 @@ function create_and_attach_config() {
     # Clean up work directory
     rm -rf "${work_dir}"
 
-    # Attach the ISO to the VM as ide3 (since ide2 is used by the installation ISO)
+    # Attach the ISO to the VM as ide3
     if ! qm set "${VMID}" --ide3 "${ISO_STORAGE}:iso/${iso_name},media=cdrom"; then
-        msg_error "Failed to attach config ISO to VM"
+        msg_error "Failed to attach configuration ISO to VM"
         rm -f "${iso_storage_path}/${iso_name}"
         exit 1
     fi
 
-    msg_ok "Config ISO created and attached as ide3"
+    msg_ok "Config image created and attached as ide3"
 }
 
 #################################################################################
