@@ -1,19 +1,5 @@
 #!/usr/bin/env bash
 # Purpose: Automate the creation of an OPNsense VM in Proxmox VE
-# The script will:
-# 1. Parse available OPNsense versions from the mirror
-# 2. Allow user selection of version or local ISO
-# 3. Create and configure the VM with user-specified or default settings
-# 4. Optionally configure networking and automation
-#
-# Features:
-# - Automatic version detection and download
-# - Local ISO support
-# - Network interface management
-# - Automated installation support
-# - Configuration import capabilities
-# - Comprehensive error handling
-#
 # Dependencies: wget, curl, whiptail, bunzip2, Proxmox CLI tools (qm, pvesm, pvesh)
 
 set -euo pipefail
@@ -814,28 +800,40 @@ function volume_exists() {
 #   6) Attaches the ISO
 #   7) Sets the boot order (semicolon-separated in Proxmox 8).
 ###############################################################################
+###############################################################################
+# create_vm
+###############################################################################
+# Purpose:
+#   1) Creates the VM shell with 'qm create'.
+#   2) Detects storage type (dir, zfspool, etc.) to decide if we need ".raw".
+#   3) Allocates & attaches the EFI disk by index efi_index, offering Overwrite/Next
+#      if the name is already taken.
+#   4) Allocates & attaches the Main disk by index (efi_index + 1), similarly offering
+#      Overwrite/Next.
+#   5) Attaches the chosen ISO & uses semicolon in the "boot order" for Proxmox 8.
+###############################################################################
 function create_vm() {
-    # 1) Prep
+    # 1) Basic prep
     ISO_FILE="$ISO_BASENAME"
     CREATION_DATE=$(date +"%Y-%m-%d")
 
-    # Detect the storage type: "dir", "zfspool", etc.
+    # Detect the storage type (for deciding if .raw extension is needed)
     local STORAGE_TYPE
     STORAGE_TYPE=$(pvesm status | awk -v s="$VM_STORAGE" '$1 == s {print $2}')
 
-    # If it's 'dir', we typically must use ".raw" extension
+    # For 'dir' storage, we often need an actual file extension (e.g., .raw).
     local extension=""
     if [[ "$STORAGE_TYPE" == "dir" ]]; then
         extension=".raw"
     fi
 
     msg_info "Debug: VM_STORAGE='$VM_STORAGE' is type='$STORAGE_TYPE'"
-    msg_info "Debug Info: VM_STORAGE='$VM_STORAGE', ISO_STORAGE='$ISO_STORAGE', VMID='$VMID'"
+    msg_info "Debug: VMID='$VMID', ISO_STORAGE='$ISO_STORAGE', ISO_FILE='$ISO_FILE'"
     pvesm status || true
 
-    msg_info "Creating an OPNsense VM..."
+    msg_info "Creating an OPNsense VM shell..."
 
-    # 2) Build network options
+    # 2) Optionally build network interfaces if user wants host-bridge management
     if [ "$MANAGE_INTERFACES" = "yes" ]; then
         NET_OPTS="-net0 virtio,bridge=$BRIDGE1,macaddr=$MAC1,mtu=$MTU1 \
 -net1 virtio,bridge=$BRIDGE2,macaddr=$MAC2,mtu=$MTU2 \
@@ -844,7 +842,7 @@ function create_vm() {
         NET_OPTS=""
     fi
 
-    # 3) Create the VM shell
+    # 3) Create the VM "shell"
     qm create "$VMID" \
         -agent enabled=1 \
         -tablet 0 \
@@ -861,53 +859,56 @@ function create_vm() {
         -ostype l26 \
         -scsihw virtio-scsi-pci
 
+    # Check if the VM got created at all
     if ! qm status "$VMID" &>/dev/null; then
         msg_error "Failed to create VM $VMID. Exiting."
         exit 1
     fi
 
     ###########################################################################
-    # 4) Allocate & attach EFI disk
+    # 4) EFI Disk
     ###########################################################################
     msg_info "Creating EFI disk..."
     local efi_index=0
 
     while true; do
-        # e.g., "vm-108-disk-0.raw" or "vm-108-disk-0"
         local efi_filename="vm-${VMID}-disk-${efi_index}${extension}"
         local efi_storage_volume="${VM_STORAGE}:${efi_filename}"
 
-        msg_info "Debug: Checking if EFI volume name is free => $efi_storage_volume"
+        msg_info "Debug: Checking if EFI volume => $efi_storage_volume"
         if volume_exists "$efi_storage_volume"; then
-            # Volume DOES exist => ask user whether to Overwrite or Next
             msg_info "Volume '$efi_storage_volume' already exists."
             if (whiptail --title "EFI Disk Exists" --yesno \
-                "Volume $efi_storage_volume already exists.\n\nOverwrite it?\n\nWARNING: Overwriting DESTROYS existing data.\n\n(Yes = Overwrite / No = Next index)" \
-                12 74 --yes-button "Overwrite" --no-button "Next") then
+                "Volume $efi_storage_volume already exists.\n\nOverwrite it?\nThis will DESTROY existing data.\n\n(Yes=Overwrite / No=Next index)" \
+                12 70 --yes-button "Overwrite" --no-button "Next"); then
 
-                msg_info "Overwriting existing volume => $efi_storage_volume"
+                # Overwrite: remove the old volume
+                msg_info "Overwriting => $efi_storage_volume"
                 if ! pvesm free "$efi_storage_volume"; then
                     msg_error "Failed to remove existing volume => $efi_storage_volume"
                     exit 1
                 fi
 
-                msg_info "Allocating EFI volume => $efi_filename ($EFI_DISK_SIZE)"
+                # Allocate new EFI volume
+                msg_info "Allocating EFI => $efi_filename (size=$EFI_DISK_SIZE)"
                 pvesm alloc "$VM_STORAGE" "$VMID" "$efi_filename" "$EFI_DISK_SIZE" --format raw
 
-                msg_info "Attaching EFI disk => $efi_storage_volume"
+                # Attach as efidisk0
+                msg_info "Attaching EFI => $efi_storage_volume"
                 qm set "$VMID" -efidisk0 "${efi_storage_volume},efitype=4m"
                 msg_ok "EFI disk created & attached => $efi_storage_volume"
                 break
             else
-                msg_info "Skipping index=$efi_index, incrementing to try next..."
+                # "Next index"
+                msg_info "Skipping efi_index=$efi_index, trying efi_index=$((efi_index+1))"
                 ((efi_index++))
             fi
         else
-            # Volume does NOT exist => just allocate
-            msg_info "Allocating EFI volume => $efi_filename ($EFI_DISK_SIZE)"
+            # Volume does NOT exist => allocate it fresh
+            msg_info "Allocating EFI volume => $efi_filename (size=$EFI_DISK_SIZE)"
             pvesm alloc "$VM_STORAGE" "$VMID" "$efi_filename" "$EFI_DISK_SIZE" --format raw
 
-            msg_info "Attaching EFI disk => $efi_storage_volume"
+            msg_info "Attaching EFI => $efi_storage_volume"
             qm set "$VMID" -efidisk0 "${efi_storage_volume},efitype=4m"
             msg_ok "EFI disk created & attached => $efi_storage_volume"
             break
@@ -915,26 +916,24 @@ function create_vm() {
     done
 
     ###########################################################################
-    # 5) Allocate & attach the Main disk
+    # 5) Main Disk
     ###########################################################################
     msg_info "Attaching main disk..."
-
-    # Force the main disk to start from efi_index + 1 => cannot clash with EFI name
+    # Force the main disk index to always be one higher than the EFI disk index
     local main_index=$((efi_index + 1))
 
     while true; do
         local main_filename="vm-${VMID}-disk-${main_index}${extension}"
         local main_storage_volume="${VM_STORAGE}:${main_filename}"
 
-        msg_info "Debug: Checking if main disk name is free => $main_storage_volume"
+        msg_info "Debug: Checking if main volume => $main_storage_volume"
         if volume_exists "$main_storage_volume"; then
-            # Already exists => Overwrite or Next?
             msg_info "Main disk volume '$main_storage_volume' already exists."
             if (whiptail --title "Main Disk Exists" --yesno \
-                "Volume $main_storage_volume already exists.\n\nOverwrite it?\n\nWARNING: Overwriting DESTROYS existing data.\n\n(Yes = Overwrite / No = Next index)" \
-                12 74 --yes-button "Overwrite" --no-button "Next") then
+                "Volume $main_storage_volume already exists.\n\nOverwrite it?\nThis will DESTROY existing data.\n\n(Yes=Overwrite / No=Next index)" \
+                12 70 --yes-button "Overwrite" --no-button "Next"); then
 
-                msg_info "Overwriting existing volume => $main_storage_volume"
+                msg_info "Overwriting => $main_storage_volume"
                 if ! pvesm free "$main_storage_volume"; then
                     msg_error "Failed to remove existing volume => $main_storage_volume"
                     exit 1
@@ -943,55 +942,56 @@ function create_vm() {
                 msg_info "Allocating main disk => $main_filename (size=$DISK_SIZE)"
                 pvesm alloc "$VM_STORAGE" "$VMID" "$main_filename" "$DISK_SIZE" --format raw
 
-                # Attach with a small retry loop
+                # Attempt scsi0 attach with retry logic
                 local attached=false
                 local RETRY_COUNT=5
                 local RETRY_DELAY=5
 
                 for ((i=1; i<=RETRY_COUNT; i++)); do
-                    msg_info "Attempt #$i: qm set $VMID -scsi0 $main_storage_volume"
+                    msg_info "Try #$i: qm set $VMID -scsi0 $main_storage_volume"
                     if qm set "$VMID" -scsi0 "$main_storage_volume"; then
                         msg_ok "Main disk attached => $main_storage_volume"
                         attached=true
                         break
                     else
-                        msg_error "Failed to attach main disk (attempt #$i). Retrying in $RETRY_DELAY sec..."
+                        msg_error "Attach attempt #$i failed. Retrying in $RETRY_DELAY seconds..."
                         sleep $RETRY_DELAY
                     fi
                 done
 
                 if [ "$attached" = false ]; then
-                    msg_error "Unable to attach main disk after $RETRY_COUNT attempts. Exiting..."
+                    msg_error "Could not attach main disk after $RETRY_COUNT tries."
                     exit 1
                 fi
                 break
             else
-                msg_info "Skipping index=$main_index; incrementing to try next..."
+                msg_info "Skipping main_index=$main_index, incrementing..."
                 ((main_index++))
             fi
         else
+            # Fresh allocate
             msg_info "Allocating main disk => $main_filename (size=$DISK_SIZE)"
             pvesm alloc "$VM_STORAGE" "$VMID" "$main_filename" "$DISK_SIZE" --format raw
 
-            # Attach with retries
+            # Attach with a small retry loop
             local attached=false
             local RETRY_COUNT=5
             local RETRY_DELAY=5
 
             for ((i=1; i<=RETRY_COUNT; i++)); do
-                msg_info "Attempt #$i: qm set $VMID -scsi0 $main_storage_volume"
+                msg_info "Try #$i: qm set $VMID -scsi0 $main_storage_volume"
                 if qm set "$VMID" -scsi0 "$main_storage_volume"; then
                     msg_ok "Main disk attached => $main_storage_volume"
                     attached=true
                     break
                 else
-                    msg_error "Failed to attach main disk (attempt #$i). Retrying in $RETRY_DELAY sec..."
+                    msg_error "Attach attempt #$i failed. Retrying..."
                     sleep $RETRY_DELAY
                 fi
             done
 
             if [ "$attached" = false ]; then
-                msg_error "Unable to attach main disk after $RETRY_COUNT attempts. Exiting..."
+                msg_error "Could not attach main disk after $RETRY_COUNT tries."
                 exit 1
             fi
             break
@@ -1005,7 +1005,7 @@ function create_vm() {
     qm set "$VMID" -ide2 "$ISO_STORAGE:iso/$ISO_FILE,media=cdrom"
 
     ###########################################################################
-    # 7) Boot order (semicolon separated in PVE 8)
+    # 7) Boot order (semicolon in Proxmox 8)
     ###########################################################################
     msg_info "Setting boot order => ide2;scsi0"
     qm set "$VMID" -boot order="ide2;scsi0"
@@ -1017,7 +1017,7 @@ function create_vm() {
     qm set "$VMID" \
       -description "# OPNsense - VM - $VMID - Created $CREATION_DATE - ISO Used: $ISO_USED</div><div align='center'><a href='https://opnsense.org/' target='_blank'><img src='https://icons.iconarchive.com/icons/simpleicons-team/simple/512/opnsense-icon.png'/></a><br><br>"
 
-    msg_ok "Created an OPNsense VM ($HN) successfully!"
+    msg_ok "Created OPNsense VM ($HN) successfully!"
 }
 
 function automate_install() {
