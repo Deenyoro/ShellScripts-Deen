@@ -1214,6 +1214,7 @@ function prompt_mount_config() {
 function interactive_mount_config() {
     CONFIG_XML_PATH=""
     IMAGE_SIZE=""
+    IMAGE_SIZE_NUM=""  # Add this line
     VM_ID="$VMID"
     USB_LABEL=""
     STORAGE=""
@@ -1249,6 +1250,7 @@ function interactive_mount_config() {
         # If empty, default to "32M"
         if [[ -z "$IMAGE_SIZE" ]]; then
             IMAGE_SIZE="32M"
+            IMAGE_SIZE_NUM=32
         fi
 
         # Extract the numeric portion if it matches "<number>M"
@@ -1291,10 +1293,9 @@ function interactive_mount_config() {
 }
 
 function create_and_attach_usb() {
-    IMAGE_FILE="/tmp/opnsense_config.img"
+    local IMAGE_FILE="/tmp/opnsense_config.img"
 
     # 1) Check how big the config.xml file is
-    #    This works on BSD (stat -f) or Linux (stat -c)
     local CONFIG_SIZE
     CONFIG_SIZE=$(stat -f %z "$CONFIG_XML_PATH" 2>/dev/null || stat -c %s "$CONFIG_XML_PATH")
     if [[ -z "$CONFIG_SIZE" || "$CONFIG_SIZE" -le 0 ]]; then
@@ -1302,27 +1303,30 @@ function create_and_attach_usb() {
         exit 1
     fi
 
-    # 2) At least 1 MiB overhead + 32 MiB buffer for FAT32 overhead
-    #    so if your config is 100 KB, we create a partition that is
-    #    at least config_size + 1 MiB + 32 MiB => about 33 MiB
+    # 2) Calculate minimum size needed
     local MIN_SIZE=$((CONFIG_SIZE + 1*1024*1024 + 32*1024*1024))
-    local MIN_MB=$(( (MIN_SIZE + 1024*1024 - 1) / (1024*1024) ))  # round up
+    local MIN_MB=$(( (MIN_SIZE + 1024*1024 - 1) / (1024*1024) ))
 
-    # Compare MIN_MB to the user’s chosen IMAGE_SIZE_NUM (like 32)
+    # Ensure IMAGE_SIZE_NUM is properly set
+    if [[ -z "$IMAGE_SIZE_NUM" ]]; then
+        IMAGE_SIZE_NUM=32
+        IMAGE_SIZE="32M"
+    fi
+
     if [[ "$IMAGE_SIZE_NUM" -lt "$MIN_MB" ]]; then
-        # If the user’s entered size is too small,
-        # we automatically bump it up to MIN_MB
         IMAGE_SIZE_NUM="$MIN_MB"
         IMAGE_SIZE="${IMAGE_SIZE_NUM}M"
         msg_info "Increasing FAT32 image size to $IMAGE_SIZE to accommodate $CONFIG_XML_PATH"
     fi
 
+    # 3) Create the image file
     msg_info "Creating a $IMAGE_SIZE FAT32 image at $IMAGE_FILE..."
     if ! dd if=/dev/zero of="$IMAGE_FILE" bs=1M count="$IMAGE_SIZE_NUM" status=progress; then
         msg_error "Failed to create $IMAGE_FILE"
         exit 1
     fi
 
+    # 4) Format as FAT32
     msg_info "Formatting the image as FAT32 with label '$USB_LABEL'..."
     if ! mkfs.vfat -F 32 -n "$USB_LABEL" "$IMAGE_FILE"; then
         msg_error "Failed to format $IMAGE_FILE as FAT32"
@@ -1330,7 +1334,8 @@ function create_and_attach_usb() {
         exit 1
     fi
 
-    msg_info "Mounting the image..."
+    # 5) Mount the image
+    local MOUNT_POINT
     MOUNT_POINT=$(mktemp -d)
     msg_info "Mount point created at $MOUNT_POINT."
 
@@ -1341,6 +1346,7 @@ function create_and_attach_usb() {
         exit 1
     fi
 
+    # 6) Create conf directory and copy config
     msg_info "Creating /conf directory and copying config.xml..."
     if ! mkdir -p "$MOUNT_POINT/conf"; then
         msg_error "Failed to create $MOUNT_POINT/conf directory"
@@ -1350,7 +1356,7 @@ function create_and_attach_usb() {
         exit 1
     fi
 
-    # Make sure we have enough free space on the mounted image to copy config.xml
+    # 7) Check available space
     local AVAILABLE_SPACE
     AVAILABLE_SPACE=$(df -B1 "$MOUNT_POINT" | awk 'NR==2 {print $4}')
     if [[ -z "$AVAILABLE_SPACE" ]]; then
@@ -1369,6 +1375,7 @@ function create_and_attach_usb() {
         exit 1
     fi
 
+    # 8) Copy the config file
     if ! cp "$CONFIG_XML_PATH" "$MOUNT_POINT/conf/config.xml"; then
         msg_error "Failed to copy $CONFIG_XML_PATH into $MOUNT_POINT/conf/"
         umount "$MOUNT_POINT" || true
@@ -1377,7 +1384,7 @@ function create_and_attach_usb() {
         exit 1
     fi
 
-    # Verify file was copied correctly
+    # 9) Verify the copy
     if ! cmp -s "$CONFIG_XML_PATH" "$MOUNT_POINT/conf/config.xml"; then
         msg_error "Copied config.xml does not match the original!"
         umount "$MOUNT_POINT" || true
@@ -1386,6 +1393,7 @@ function create_and_attach_usb() {
         exit 1
     fi
 
+    # 10) Unmount and cleanup
     msg_info "Unmounting the image and cleaning up..."
     sync
     if ! umount "$MOUNT_POINT"; then
@@ -1397,8 +1405,8 @@ function create_and_attach_usb() {
     rmdir "$MOUNT_POINT"
     msg_ok "Image unmounted and mount point removed."
 
-    msg_info "Uploading the image to Proxmox storage..."
-    DEST_PATH="/var/lib/vz/images/$VMID/opnsense_config.img"
+    # 11) Move to final location
+    local DEST_PATH="/var/lib/vz/images/${VMID}/opnsense_config.img"
     if ! mkdir -p "$(dirname "$DEST_PATH")"; then
         msg_error "Failed to create directory: $(dirname "$DEST_PATH")"
         rm -f "$IMAGE_FILE"
@@ -1412,15 +1420,17 @@ function create_and_attach_usb() {
     fi
     msg_ok "Image copied to $DEST_PATH."
 
-    # Remove local temp file
+    # Cleanup temp file
     rm -f "$IMAGE_FILE"
 
+    # 12) Attach to VM
     msg_info "Attaching the image to VM ID $VMID as a VirtIO disk..."
-    # Find an unused virtio slot
+    local EXISTING_VIRTIO
     EXISTING_VIRTIO=$(qm config "$VMID" | grep "^virtio" | awk -F: '{print $1}' | sort)
-    VIRTIO_SLOT=""
+    local VIRTIO_SLOT=""
+
     for i in {0..9}; do
-        SLOT="virtio$i"
+        local SLOT="virtio$i"
         if ! echo "$EXISTING_VIRTIO" | grep -q "^$SLOT"; then
             VIRTIO_SLOT="$SLOT"
             break
@@ -1432,7 +1442,7 @@ function create_and_attach_usb() {
         exit 1
     fi
 
-    if ! qm set "$VMID" --"$VIRTIO_SLOT" "$USB_STORAGE":/images/"$VMID"/opnsense_config.img,format=raw; then
+    if ! qm set "$VMID" --"$VIRTIO_SLOT" "$USB_STORAGE:images/$VMID/opnsense_config.img,format=raw"; then
         msg_error "Failed to attach $DEST_PATH to VM $VMID"
         exit 1
     fi
