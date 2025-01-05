@@ -1442,8 +1442,9 @@ function create_and_attach_usb() {
         exit 1
     fi
 
-    if ! qm set "$VMID" --"$VIRTIO_SLOT" "$USB_STORAGE:images/$VMID/opnsense_config.img,format=raw"; then
-        msg_error "Failed to attach $DEST_PATH to VM $VMID"
+    # Fixed storage path format
+    if ! qm set "$VMID" --"$VIRTIO_SLOT" "${USB_STORAGE}:images/${VMID}/opnsense_config.img,format=raw"; then
+        msg_error "Failed to attach image to VM $VMID"
         exit 1
     fi
 
