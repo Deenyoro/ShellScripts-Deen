@@ -1213,10 +1213,10 @@ function prompt_mount_config() {
 function interactive_mount_config() {
     CONFIG_XML_PATH=""
     IMAGE_SIZE=""
-    IMAGE_SIZE_NUM=""  # Add this line
+    IMAGE_SIZE_NUM=""
     VM_ID="$VMID"
-    USB_LABEL=""
-    STORAGE=""
+    CONFIG_LABEL=""
+    CONFIG_STORAGE=""
 
     # 1) Prompt for config.xml file
     while true; do
@@ -1236,11 +1236,11 @@ function interactive_mount_config() {
         fi
     done
 
-    # 2) Prompt for desired FAT32 image size (with 32M default)
+    # 2) Prompt for desired image size (with 32M default)
     while true; do
         IMAGE_SIZE=$(whiptail \
             --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Enter the size of the FAT32 image (32M+ recommended):" \
+            --inputbox "Enter the size of the configuration image (32M+ recommended):" \
             10 60 "32M" \
             --title "IMAGE SIZE" \
             --cancel-button "Exit Script" \
@@ -1264,11 +1264,11 @@ function interactive_mount_config() {
         fi
     done
 
-    # 3) Prompt for config label, default to "CONFIG" (uppercase enforced)
+    # 3) Prompt for configuration label
     while true; do
         CONFIG_LABEL=$(whiptail \
             --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Enter the volume label for the configuration ISO:" \
+            --inputbox "Enter the volume label for the config image:" \
             10 60 "CONFIG" \
             --title "CONFIG LABEL" \
             --cancel-button "Exit Script" \
@@ -1277,16 +1277,17 @@ function interactive_mount_config() {
         CONFIG_LABEL=$(echo "$CONFIG_LABEL" | tr '[:lower:]' '[:upper:]')
 
         if [[ -n "$CONFIG_LABEL" ]]; then
-            msg_ok "Configuration ISO label set to '$CONFIG_LABEL'."
+            msg_ok "Config image label set to '$CONFIG_LABEL'."
             break
         else
             msg_error "Volume label cannot be empty. Please try again."
         fi
     done
 
-    # 4) Ask which storage to use for the USB (images)
+    # 4) Ask which storage to use for the configuration ISO
     CONFIG_STORAGE=$(select_config_storage "Configuration Storage Location" "Which storage pool should the config image be created in?")
 
+    # 5) Create and attach the configuration ISO
     create_and_attach_config
 }
 
@@ -1307,9 +1308,9 @@ function create_and_attach_config() {
     fi
 
     # Create the ISO
-    msg_info "Creating config image..."
+    msg_info "Creating configuration ISO..."
     if ! genisoimage -o "${work_dir}/${iso_name}" -V "${CONFIG_LABEL}" -r -J "${work_dir}"; then
-        msg_error "Failed to create configuration ISO"
+        msg_error "Failed to create config image"
         rm -rf "${work_dir}"
         exit 1
     fi
@@ -1335,7 +1336,7 @@ function create_and_attach_config() {
 
     # Attach the ISO to the VM as ide3
     if ! qm set "${VMID}" --ide3 "${ISO_STORAGE}:iso/${iso_name},media=cdrom"; then
-        msg_error "Failed to attach configuration ISO to VM"
+        msg_error "Failed to attach config image to VM"
         rm -f "${iso_storage_path}/${iso_name}"
         exit 1
     fi
