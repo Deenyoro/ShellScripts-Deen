@@ -256,6 +256,40 @@ function select_disk_storage() {
     echo "$chosen_storage"
 }
 
+function select_usb_storage() {
+    local title="$1"
+    local prompt="$2"
+
+    local menu_items=()
+    # We look for storages that can hold 'images' because a USB image is effectively just a VM disk
+    while IFS= read -r line; do
+        # pvesm status -content images => storages that can store VM disk images
+        [[ -z "$line" || "$line" =~ ^Name ]] && continue
+
+        local tag=$(echo "$line" | awk '{print $1}')
+        local stype=$(echo "$line" | awk '{print $2}')
+        local free=$(echo "$line" | awk '{print $6}')
+
+        [[ -z "$tag" ]] && continue
+
+        local item="Type: $stype, Free: ${free}B"
+        menu_items+=("$tag" "$item")
+    done < <(pvesm status -content images)
+
+    if [ ${#menu_items[@]} -eq 0 ]; then
+        msg_error "No valid storage found for storing a USB disk image. Exiting..."
+        exit 1
+    fi
+
+    local chosen_usb_storage
+    chosen_usb_storage=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+        --title "$title" \
+        --menu "$prompt" 16 70 8 \
+        "${menu_items[@]}" 3>&1 1>&2 2>&3) || exit_script
+
+    echo "$chosen_usb_storage"
+}
+
 #################################################################################
 # VM Configuration (Default & Advanced)                                          #
 #################################################################################
