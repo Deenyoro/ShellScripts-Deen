@@ -14,7 +14,7 @@ FALLBACK_URL="https://mirrors.ocf.berkeley.edu/opnsense/releases/24.7/OPNsense-2
 FALLBACK_RELEASE_DATE="2024-Jul-23"  # Known release date for OPNsense 24.7
 FALLBACK_VERSION="24.7"
 
-# VM ID range (OPNsense VMs will start from this ID)
+# VM ID range
 STARTING_VM_ID=100
 NEXTID=$STARTING_VM_ID
 
@@ -123,14 +123,12 @@ function check_dependencies() {
 }
 
 function check_vmid {
-    # We'll increment NEXTID until we find an ID not used by either a VM or a container
+    # We'll increment NEXTID until we find an ID not used by a VM or container
     while true; do
-        # Check if used by a VM
         if qm list | awk '{print $1}' | grep -qw "$NEXTID"; then
             ((NEXTID++))
             continue
         fi
-        # Check if used by a container
         if pct list | awk '{print $1}' | grep -qw "$NEXTID"; then
             ((NEXTID++))
             continue
@@ -177,7 +175,8 @@ function ssh_check() {
         if ! whiptail --backtitle "Proxmox VE OPNsense Install Script" \
             --defaultno \
             --title "SSH DETECTED" \
-            --yesno "It's suggested to use the Proxmox shell instead of SSH. Proceed anyway?" 10 62 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"; then
+            --yesno "It's suggested to use the Proxmox shell instead of SSH. Proceed anyway?" 10 62 \
+            --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"; then
             clear
             exit 1
         fi
@@ -185,154 +184,80 @@ function ssh_check() {
 }
 
 #################################################################################
-# Select Storage Functions                                                      #
+# Distinct Functions for Selecting ISO Storage vs. VM Disk Storage
+#################################################################################
+# We explicitly filter for storages that have "iso" vs. "images" contents, so you
+# can pick one storage for the ISO and a different storage for VM Disks.
 #################################################################################
 
 function select_iso_storage() {
-    local title="$1"
-    local description="$2"
-
-    # Send log messages to stderr:
-    msg_info "Validating Storage for ISO" >&2
+    local title="ISO STORAGE"
+    local prompt="Which storage pool would you like to use for the OPNsense ISO?"
 
     local menu_items=()
-
     while IFS= read -r line; do
+        # "pvesm status -content iso" => storages that can store ISOs
         [[ -z "$line" || "$line" =~ ^Name ]] && continue
 
         local tag=$(echo "$line" | awk '{print $1}')
-        local type=$(echo "$line" | awk '{print $2}')
+        local stype=$(echo "$line" | awk '{print $2}')
         local free=$(echo "$line" | awk '{print $6}')
 
         [[ -z "$tag" ]] && continue
 
-        local free_human
-        if [[ "$free" =~ ^[0-9]+$ ]]; then
-            free_human=$(numfmt --from=iec --to=iec "${free}B" 2>/dev/null || echo "$free"B)
-        else
-            free_human="N/A"
-        fi
-
-        menu_items+=("$tag" "Type: $type Free: $free_human")
-    done < <(pvesm status)
+        local item="Type: $stype, Free: ${free}B"
+        menu_items+=("$tag" "$item")
+    done < <(pvesm status -content iso)
 
     if [ ${#menu_items[@]} -eq 0 ]; then
-        msg_error "No valid storage locations found" >&2
+        msg_error "No valid storage found for storing ISO files. Exiting..."
         exit 1
     fi
 
-    local iso_storage
-    iso_storage=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+    local chosen_storage
+    chosen_storage=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --title "$title" \
-        --menu "$description" \
-        16 80 8 \
+        --menu "$prompt" 16 70 8 \
         "${menu_items[@]}" 3>&1 1>&2 2>&3) || exit_script
 
-    if [ -z "${iso_storage}" ]; then
-        iso_storage="${menu_items[0]}"
-    fi
-
-    # Again, log to stderr:
-    msg_ok "Using $iso_storage for ISO Storage" >&2
-
-    # Print only the actual storage name to stdout:
-    echo "$iso_storage"
+    echo "$chosen_storage"
 }
 
 function select_disk_storage() {
-    local title="$1"
-    local description="$2"
+    local title="VM Disk Storage"
+    local prompt="Which storage pool would you like to use for the OPNsense VM Disks?"
 
-    msg_info "Validating Storage for VM Disks" >&2
     local menu_items=()
-
     while IFS= read -r line; do
+        # "pvesm status -content images" => storages for VM images
         [[ -z "$line" || "$line" =~ ^Name ]] && continue
 
         local tag=$(echo "$line" | awk '{print $1}')
-        local type=$(echo "$line" | awk '{print $2}')
+        local stype=$(echo "$line" | awk '{print $2}')
         local free=$(echo "$line" | awk '{print $6}')
 
         [[ -z "$tag" ]] && continue
 
-        local free_human
-        if [[ "$free" =~ ^[0-9]+$ ]]; then
-            free_human=$(numfmt --from=iec --to=iec "${free}B" 2>/dev/null || echo "$free"B)
-        else
-            free_human="N/A"
-        fi
-
-        menu_items+=("$tag" "Type: $type Free: $free_human")
-    done < <(pvesm status)
+        local item="Type: $stype, Free: ${free}B"
+        menu_items+=("$tag" "$item")
+    done < <(pvesm status -content images)
 
     if [ ${#menu_items[@]} -eq 0 ]; then
-        msg_error "No valid storage locations found for VM disks" >&2
+        msg_error "No valid storage found for VM disk images. Exiting..."
         exit 1
     fi
 
-    local vm_storage
-    vm_storage=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+    local chosen_storage
+    chosen_storage=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --title "$title" \
-        --menu "$description" \
-        16 80 8 \
+        --menu "$prompt" 16 70 8 \
         "${menu_items[@]}" 3>&1 1>&2 2>&3) || exit_script
 
-    if [ -z "${vm_storage}" ]; then
-        vm_storage="${menu_items[0]}"
-    fi
-
-    msg_ok "Using $vm_storage for VM Disk Storage" >&2
-    echo "$vm_storage"
-}
-
-function select_usb_storage() {
-    local title="$1"
-    local description="$2"
-
-    msg_info "Validating Storage for USB Image" >&2
-    local menu_items=()
-
-    while IFS= read -r line; do
-        [[ -z "$line" || "$line" =~ ^Name ]] && continue
-
-        local tag=$(echo "$line" | awk '{print $1}')
-        local type=$(echo "$line" | awk '{print $2}')
-        local free=$(echo "$line" | awk '{print $6}')
-
-        [[ -z "$tag" ]] && continue
-
-        local free_human
-        if [[ "$free" =~ ^[0-9]+$ ]]; then
-            free_human=$(numfmt --from=iec --to=iec "${free}B" 2>/dev/null || echo "$free"B)
-        else
-            free_human="N/A"
-        fi
-
-        menu_items+=("$tag" "Type: $type Free: $free_human")
-    done < <(pvesm status)
-
-    if [ ${#menu_items[@]} -eq 0 ]; then
-        msg_error "No valid storage for USB image found." >&2
-        exit 1
-    fi
-
-    local usb_storage
-    usb_storage=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --title "$title" \
-        --menu "$description" \
-        16 80 8 \
-        "${menu_items[@]}" 3>&1 1>&2 2>&3) || exit_script
-
-    if [ -z "$usb_storage" ]; then
-        usb_storage="${menu_items[0]}"
-    fi
-
-    msg_ok "Using $usb_storage for the USB image." >&2
-    echo "$usb_storage"
+    echo "$chosen_storage"
 }
 
 #################################################################################
-# VM Configuration Functions                                                     #
+# VM Configuration (Default & Advanced)                                          #
 #################################################################################
 
 function exit_script() {
@@ -448,7 +373,8 @@ function advanced_settings() {
 
     if (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --title "START VIRTUAL MACHINE" \
-        --yesno "Start VM when completed?" 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
+        --yesno "Start VM when completed?" 10 60 --yes-button "Yes" \
+        --no-button "No" --cancel-button "Exit Script"); then
         START_VM="yes"
     else
         START_VM="no"
@@ -457,7 +383,8 @@ function advanced_settings() {
 
 function start_script() {
     if whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "SETTINGS" \
-        --yesno "Use Default Settings?" --defaultno 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"; then
+        --yesno "Use Default Settings?" --defaultno 10 60 \
+        --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"; then
         default_settings
     else
         advanced_settings
@@ -466,7 +393,8 @@ function start_script() {
 
 function prompt_root_password() {
     ROOT_PASSWORD=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --title "ROOT PASSWORD" --passwordbox "Enter root password:" 10 60 --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+        --title "ROOT PASSWORD" --passwordbox "Enter root password:" 10 60 \
+        --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
     if [ -z "$ROOT_PASSWORD" ]; then
         msg_error "No password entered. Exiting..."
         exit 1
@@ -474,7 +402,7 @@ function prompt_root_password() {
 }
 
 #################################################################################
-# Mirror Date Parsing                                                           #
+# Mirror Date Parsing
 #################################################################################
 
 function convert_date() {
@@ -484,53 +412,73 @@ function convert_date() {
     month=$(echo "$input_date" | cut -d'-' -f2)
     year=$(echo "$input_date" | cut -d'-' -f1)
     case $month in
-        Jan) month="01" ;;
-        Feb) month="02" ;;
-        Mar) month="03" ;;
-        Apr) month="04" ;;
-        May) month="05" ;;
-        Jun) month="06" ;;
-        Jul) month="07" ;;
-        Aug) month="08" ;;
-        Sep) month="09" ;;
-        Oct) month="10" ;;
-        Nov) month="11" ;;
-        Dec) month="12" ;;
-        *) echo "Invalid month"; exit 1 ;;
+        Jan) month="01";;
+        Feb) month="02";;
+        Mar) month="03";;
+        Apr) month="04";;
+        May) month="05";;
+        Jun) month="06";;
+        Jul) month="07";;
+        Aug) month="08";;
+        Sep) month="09";;
+        Oct) month="10";;
+        Nov) month="11";;
+        Dec) month="12";;
+        *) echo "Invalid month"; exit 1;;
     esac
     echo "${year}${month}${day}"
 }
 
 #################################################################################
-# ISO Handling / Selection / Download                                           #
+# parse_available_versions / select_iso / handle_iso_download / select_local_iso
 #################################################################################
 
 function parse_available_versions() {
     msg_info "Parsing available OPNsense versions from mirror"
     local html_content
+    # Attempt to fetch the main directory listing
     html_content=$(curl -s "$MIRROR_BASE_URL" || true)
 
     ISO_ENTRIES=()
     local version_dirs
-    version_dirs=$(echo "$html_content" | grep -oP 'href="\K[0-9]+\.[0-9]+(?=/)' | sort -V || true)
+
+    # Example:
+    #   href="23.1/"
+    #   href="23.7/"
+    # We'll parse those version subfolders
+    version_dirs=$(echo "$html_content" \
+        | grep -oP 'href="\K[0-9]+\.[0-9]+(?=/)' \
+        | sort -V || true)
 
     for version in $version_dirs; do
         local version_url="${MIRROR_BASE_URL}${version}/"
         local version_content
         version_content=$(curl -s "$version_url" || true)
 
+        # We specifically look for the DVD ISO .bz2 file
+        # e.g. OPNsense-23.7-dvd-amd64.iso.bz2
         if [[ "$version_content" =~ OPNsense-${version}-dvd-amd64\.iso\.bz2 ]]; then
             local iso_file="OPNsense-${version}-dvd-amd64.iso.bz2"
+
+            # Attempt to extract a date from the listing (like 23-Jul-2023)
             local date_part
-            date_part=$(echo "$version_content" | grep "$iso_file" | grep -oP '\d{2}-[A-Za-z]{3}-\d{4}' || true)
+            date_part=$(echo "$version_content" \
+                | grep "$iso_file" \
+                | grep -oP '\d{2}-[A-Za-z]{3}-\d{4}' || true)
 
             if [[ -z "$date_part" ]]; then
+                # If not found, default to today's date
                 date_part=$(date +"%d-%b-%Y")
             fi
 
+            # Convert date_part to YYYYMMDD
             local formatted_date
             formatted_date=$(convert_date "$(echo "$date_part" | awk -F'-' '{print $3"-"$2"-"$1}')")
 
+            # store an entry in the format:
+            #   url|filename_with_prefix|date_part|version
+            #   filename will be:
+            #   20230723-OPNsense-23.7-dvd-amd64.iso.bz2
             ISO_ENTRIES+=("${version_url}${iso_file}|${formatted_date}-${iso_file}|${date_part}|${version}")
         fi
     done
@@ -583,64 +531,79 @@ function handle_iso_download() {
     local formatted_date=""
 
     if [ "$chosen_url" = "$FALLBACK_URL" ]; then
+        # Fallback ISO scenario
         formatted_date=$(convert_date "$FALLBACK_RELEASE_DATE")
         iso_basename="${formatted_date}-$(basename "$FALLBACK_URL")"
     else
+        # Search for the matching entry from ISO_ENTRIES
         for entry in "${ISO_ENTRIES[@]}"; do
             IFS='|' read -r url filename date version <<< "$entry"
             if [ "$url" = "$chosen_url" ]; then
-                iso_basename="$filename"
+                iso_basename="$filename"  # e.g. "20240723-OPNsense-24.7-dvd-amd64.iso.bz2"
                 break
             fi
         done
+
+        # If not found, default to fallback naming
         if [ -z "$iso_basename" ]; then
             formatted_date=$(convert_date "$FALLBACK_RELEASE_DATE")
             iso_basename="${formatted_date}-$(basename "$FALLBACK_URL")"
         fi
     fi
 
-    # Set the global ISO_BASENAME
+    # iso_basename is something like "20240723-OPNsense-24.7-dvd-amd64.iso.bz2"
+    # or just "OPNsense-24.7-dvd-amd64.iso.bz2"
+
+    # Store it globally so create_vm can see it
     ISO_BASENAME="$iso_basename"
-    
-    # Define paths based on storage selection
+
+    # Figure out the actual final directory (ISO storage path)
     local iso_storage_path
-
-if [ "$ISO_STORAGE" = "local" ]; then
-    iso_storage_path="/var/lib/vz/template/iso"
-else
-    iso_storage_path="$(pvesm path "$ISO_STORAGE")/template/iso"
-fi
-
-    
-    # Create ISO directory if it doesn't exist
+    if [ "$ISO_STORAGE" = "local" ]; then
+        iso_storage_path="/var/lib/vz/template/iso"
+    else
+        iso_storage_path="$(pvesm path "$ISO_STORAGE")/template/iso"
+    fi
     mkdir -p "$iso_storage_path"
-    
-    local final_iso_path="$iso_storage_path/${iso_basename%.bz2}.iso"
-    
-    # Check if ISO already exists
+
+    # --- Prevent double ".iso" by checking if the name already ends with .iso
+    local base_no_bz2="${iso_basename%.bz2}" 
+    local final_iso_name
+    if [[ "$base_no_bz2" =~ \.iso$ ]]; then
+        # e.g. "20240723-OPNsense-24.7-dvd-amd64.iso"
+        final_iso_name="$base_no_bz2"
+    else
+        # e.g. "20240723-OPNsense-24.7-dvd-amd64" => append .iso
+        final_iso_name="$base_no_bz2.iso"
+    fi
+
+    local final_iso_path="$iso_storage_path/$final_iso_name"
+
+    # If that final ISO already exists, ask the user if they want a fresh download
     if [ -f "$final_iso_path" ]; then
-        msg_ok "ISO file already exists: ${iso_basename%.bz2}.iso"
-        # Prompt the user to decide on redownloading
+        msg_ok "ISO file already exists: $final_iso_name"
         if whiptail --backtitle "Proxmox VE OPNsense Install Script" \
             --title "ISO Already Exists" \
-            --yesno "An ISO file named ${iso_basename%.bz2}.iso already exists.\nWould you like to delete it and download a fresh copy?" 10 60 --yes-button "Delete and Download" --no-button "Use Existing" --cancel-button "Exit Script"; then
+            --yesno "An ISO file named $final_iso_name already exists.\nDelete and redownload?" \
+            10 60 --yes-button "Delete and Download" --no-button "Use Existing" --cancel-button "Exit Script"; then
             msg_info "Deleting existing ISO: $final_iso_path"
             if ! rm -f "$final_iso_path"; then
                 msg_error "Failed to delete existing ISO: $final_iso_path"
                 exit 1
             fi
-            # Proceed to download after deletion
         else
-            msg_ok "Using existing ISO: ${iso_basename%.bz2}.iso"
+            msg_ok "Using existing ISO: $final_iso_name"
+            ISO_BASENAME="$final_iso_name"
             return
+
         fi
     fi
 
-    # Create temporary directory for download
-    local temp_dir=$(mktemp -d)
-    local temp_bz2_path="$temp_dir/${iso_basename}"
-    
-    # Download to temp directory
+    # Download the bz2 => extract => rename => done
+    local temp_dir
+    temp_dir=$(mktemp -d)
+    local temp_bz2_path="$temp_dir/$iso_basename"
+
     msg_info "Downloading from $chosen_url to temporary location"
     if ! wget -q --show-progress "$chosen_url" -O "$temp_bz2_path"; then
         msg_error "Failed to download from $chosen_url"
@@ -654,25 +617,27 @@ fi
         fi
     else
         msg_ok "Downloaded $iso_basename"
-        msg_info "Extracting ISO..."
+        msg_info "Extracting ISO from .bz2..."
         if ! bunzip2 "$temp_bz2_path"; then
             msg_error "Failed to extract $temp_bz2_path"
             rm -rf "$temp_dir"
             exit 1
         fi
-        
-        # Move extracted ISO to final location
+
+        # Move the extracted .iso => final location
         if ! mv "${temp_bz2_path%.bz2}" "$final_iso_path"; then
             msg_error "Failed to move ISO to final location"
             rm -rf "$temp_dir"
             exit 1
         fi
-        
-        # Cleanup temp directory
+		
+		ISO_BASENAME="$final_iso_name"
+		
         rm -rf "$temp_dir"
-        msg_ok "Extracted and moved ${iso_basename%.bz2}.iso to final location"
+        msg_ok "Extracted and moved $final_iso_name to final location => $iso_storage_path"
     fi
 }
+
 
 function select_local_iso() {
     ISO_LIST=()
@@ -700,35 +665,41 @@ function select_local_iso() {
 }
 
 #################################################################################
-# Network Configuration Functions                                                #
+# Network Configuration Functions
 #################################################################################
 
 function prompt_network_configuration() {
     LAN_IPV4=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --inputbox "Enter LAN IPv4 Address:" 8 60 --title "LAN IPv4 ADDRESS" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
+        --inputbox "Enter LAN IPv4 Address:" 8 60 --title "LAN IPv4 ADDRESS" \
+        --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
     if [ -z "$LAN_IPV4" ]; then
         msg_error "No LAN IPv4 Address entered. Exiting..."
         exit 1
     fi
 
     SUBNET_MASK=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --inputbox "Enter Subnet Mask (CIDR format, e.g., 24):" 8 60 --title "SUBNET MASK" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
+        --inputbox "Enter Subnet Mask (CIDR format, e.g., 24):" 8 60 \
+        --title "SUBNET MASK" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
     if [ -z "$SUBNET_MASK" ]; then
         msg_error "No Subnet Mask entered. Exiting..."
         exit 1
     fi
 
-    if (whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "DHCP SERVER" --yesno "Enable DHCP Server?" 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
+    if (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+        --title "DHCP SERVER" --yesno "Enable DHCP Server?" \
+        10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
         ENABLE_DHCP="yes"
         DHCP_START=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Start of DHCP range:" 8 60 --title "DHCP RANGE START" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
+            --inputbox "Start of DHCP range:" 8 60 \
+            --title "DHCP RANGE START" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
         if [ -z "$DHCP_START" ]; then
             msg_error "No DHCP Start Range entered. Exiting..."
             exit 1
         fi
 
         DHCP_END=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "End of DHCP range:" 8 60 --title "DHCP RANGE END" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
+            --inputbox "End of DHCP range:" 8 60 \
+            --title "DHCP RANGE END" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
         if [ -z "$DHCP_END" ]; then
             msg_error "No DHCP End Range entered. Exiting..."
             exit 1
@@ -737,54 +708,22 @@ function prompt_network_configuration() {
         ENABLE_DHCP="no"
     fi
 
-    if (whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "HTTPS ACCESS" --yesno "Enable HTTPS for Web GUI?" 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
+    if (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+        --title "HTTPS ACCESS" --yesno "Enable HTTPS for Web GUI?" \
+        10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
         ENABLE_HTTPS="y"
     else
         ENABLE_HTTPS="n"
     fi
 }
 
-#################################################################################
-# VM Creation and Configuration Functions                                        #
-#################################################################################
-
-###############################################################################
-# detect_storage_type
-###############################################################################
-# Purpose:
-#   - Given a storage name (e.g. "local" or "local-zfs"), return the storage type
-#     (e.g. "dir", "zfspool", "lvmthin", "nfs", etc.).
-#   - We parse the output of "pvesm status" to find the line matching that storage.
-###############################################################################
-function detect_storage_type() {
-    local stg="$1"
-    # We'll search for the line in 'pvesm status' that starts with stg, then
-    # return the second column => the "Type"
-    local stype
-    stype=$(pvesm status | awk -v s="$stg" '$1 == s {print $2}')
-    echo "$stype"
-}
-
-###############################################################################
-# volume_exists
-###############################################################################
-# Checks if a given "storage:volume" actually exists.
-# Returns 0 if volume *does* exist, 1 if it does NOT exist.
-# In your script, 'pvesm path <storage:volume>' was used, but we must handle it
-# carefully under set -e. This function avoids auto-exit by performing the check
-# inside an 'if' block.
-###############################################################################
 function volume_exists() {
-    local full_storage_volume="$1"  # e.g. "local:vm-108-disk-0.raw" or "local-zfs:vm-108-disk-0"
-    msg_info "Debug: Checking existence of volume: $full_storage_volume"
-
-    # The 'pvesm path' command returns 0 if the volume is found, non-zero if not.
-    if pvesm path "$full_storage_volume" &>/dev/null; then
-        msg_info "Debug: Volume exists => $full_storage_volume"
-        return 0  # "true"
+    local vol="$1"
+    # This command returns 0 if volume is found, non-zero if not
+    if pvesm path "$vol" &>/dev/null; then
+        return 0  # it exists
     else
-        msg_info "Debug: Volume does NOT exist => $full_storage_volume"
-        return 1  # "false"
+        return 1  # it does not exist
     fi
 }
 
@@ -792,77 +731,64 @@ function volume_exists() {
 # create_vm
 ###############################################################################
 # Purpose:
-#   1) Creates the VM shell with 'qm create'.
-#   2) Detects storage type (dir, zfspool, etc.) to decide if we need ".raw".
-#   3) Allocates & attaches EFI disk by index efi_index, allowing Overwrite/Next.
-#   4) Forces main_index = efi_index + 1, so main disk cannot share the same name.
-#   5) Allocates & attaches main disk by index main_index, with Overwrite/Next too.
-#   6) Attaches the ISO
-#   7) Sets the boot order (semicolon-separated in Proxmox 8).
-###############################################################################
-###############################################################################
-# create_vm
-###############################################################################
-# Purpose:
-#   1) Creates the VM shell with 'qm create'.
-#   2) Detects storage type (dir, zfspool, etc.) to decide if we need ".raw".
-#   3) Allocates & attaches the EFI disk by index efi_index, offering Overwrite/Next
-#      if the name is already taken.
-#   4) Allocates & attaches the Main disk by index (efi_index + 1), similarly offering
-#      Overwrite/Next.
-#   5) Attaches the chosen ISO & uses semicolon in the "boot order" for Proxmox 8.
+#   1) Create the VM shell (qm create).
+#   2) Detect if storage is "dir" => use ".raw" extension, else no extension.
+#   3) Allocate & attach an EFI disk with Overwrite/Next logic.
+#   4) Allocate & attach the main disk with Overwrite/Next logic.
+#   5) Attach the chosen ISO and set boot order (semicolon for PVE 8).
+#   6) Optionally add up to 3 VirtIO NICs if MANAGE_INTERFACES="yes".
+#   7) Final housekeeping (description).
 ###############################################################################
 function create_vm() {
-    # 1) Basic prep
-    ISO_FILE="$ISO_BASENAME"
-    CREATION_DATE=$(date +"%Y-%m-%d")
+    msg_info "Starting creation of an OPNsense VM..."
 
-    # Detect the storage type (for deciding if .raw extension is needed)
+    # 1) Basic definitions
+    local CREATION_DATE
+    CREATION_DATE=$(date +'%Y-%m-%d')
+
+    # (Optional) detect storage type => "dir", "zfspool", "lvmthin", etc.
     local STORAGE_TYPE
     STORAGE_TYPE=$(pvesm status | awk -v s="$VM_STORAGE" '$1 == s {print $2}')
 
-    # For 'dir' storage, we often need an actual file extension (e.g., .raw).
+    # If 'dir', we typically need a file extension (e.g. .raw)
     local extension=""
     if [[ "$STORAGE_TYPE" == "dir" ]]; then
         extension=".raw"
     fi
 
-    msg_info "Debug: VM_STORAGE='$VM_STORAGE' is type='$STORAGE_TYPE'"
-    msg_info "Debug: VMID='$VMID', ISO_STORAGE='$ISO_STORAGE', ISO_FILE='$ISO_FILE'"
-    pvesm status || true
+    msg_info "Debug: VM_STORAGE='$VM_STORAGE' (type=$STORAGE_TYPE), ISO_STORAGE='$ISO_STORAGE'"
+    msg_info "Debug: VMID='$VMID', EFI_DISK_SIZE='$EFI_DISK_SIZE', DISK_SIZE='$DISK_SIZE'"
+    pvesm status || true  # optional listing of storages for debug
 
-    msg_info "Creating an OPNsense VM shell..."
+    # 2) Create the VM shell
+    msg_info "Creating VM shell => ID=$VMID, Hostname=$HN"
+    qm create "$VMID" \
+      -agent enabled=1 \
+      -tablet 0 \
+      -bios ovmf \
+      -machine "$MACHINE" \
+      -cpu "$CPU_TYPE" \
+      -cores "$CORE_COUNT" \
+      -memory "$RAM_SIZE" \
+      -name "$HN" \
+      -tags firewall \
+      -localtime 1 \
+      -onboot 1 \
+      -ostype l26 \
+      -scsihw virtio-scsi-pci
 
-    # 2) Optionally build network interfaces if user wants host-bridge management
-    if [ "$MANAGE_INTERFACES" = "yes" ]; then
-        NET_OPTS="-net0 virtio,bridge=$BRIDGE1,macaddr=$MAC1,mtu=$MTU1 \
--net1 virtio,bridge=$BRIDGE2,macaddr=$MAC2,mtu=$MTU2 \
--net2 virtio,bridge=$BRIDGE3,macaddr=$MAC3,mtu=$MTU3"
-    else
-        NET_OPTS=""
+    # verify creation
+    if ! qm status "$VMID" &>/dev/null; then
+        msg_error "Failed to create VM shell for ID=$VMID. Exiting."
+        exit 1
     fi
 
-    # 3) Create the VM "shell"
-    qm create "$VMID" \
-        -agent enabled=1 \
-        -tablet 0 \
-        -localtime 1 \
-        -bios ovmf \
-        -machine "$MACHINE" \
-        -cpu "$CPU_TYPE" \
-        -cores "$CORE_COUNT" \
-        -memory "$RAM_SIZE" \
-        -name "$HN" \
-        -tags firewall \
-        $NET_OPTS \
-        -onboot 1 \
-        -ostype l26 \
-        -scsihw virtio-scsi-pci
-
-    # Check if the VM got created at all
-    if ! qm status "$VMID" &>/dev/null; then
-        msg_error "Failed to create VM $VMID. Exiting."
-        exit 1
+    # 3) Optionally add NICs if MANAGE_INTERFACES="yes"
+    if [ "$MANAGE_INTERFACES" = "yes" ]; then
+        msg_info "Adding up to 3 VirtIO NICs (WAN, LAN, MGMT) ..."
+        qm set "$VMID" -net0 "virtio,bridge=$BRIDGE1,macaddr=$MAC1,mtu=$MTU1"
+        qm set "$VMID" -net1 "virtio,bridge=$BRIDGE2,macaddr=$MAC2,mtu=$MTU2"
+        qm set "$VMID" -net2 "virtio,bridge=$BRIDGE3,macaddr=$MAC3,mtu=$MTU3"
     fi
 
     ###########################################################################
@@ -875,40 +801,36 @@ function create_vm() {
         local efi_filename="vm-${VMID}-disk-${efi_index}${extension}"
         local efi_storage_volume="${VM_STORAGE}:${efi_filename}"
 
-        msg_info "Debug: Checking if EFI volume => $efi_storage_volume"
+        msg_info "Debug: Checking EFI disk => $efi_storage_volume"
         if volume_exists "$efi_storage_volume"; then
-            msg_info "Volume '$efi_storage_volume' already exists."
-            if (whiptail --title "EFI Disk Exists" --yesno \
-                "Volume $efi_storage_volume already exists.\n\nOverwrite it?\nThis will DESTROY existing data.\n\n(Yes=Overwrite / No=Next index)" \
-                12 70 --yes-button "Overwrite" --no-button "Next"); then
+            msg_info "EFI volume '$efi_storage_volume' already exists."
+            if whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                --title "EFI Disk Exists" \
+                --yesno "Volume '$efi_storage_volume' already exists.\n\nDo you want to overwrite it? (This will DESTROY all data on the disk.)" \
+                12 70 --yes-button "Overwrite" --no-button "Exit Script"; then
 
-                # Overwrite: remove the old volume
                 msg_info "Overwriting => $efi_storage_volume"
                 if ! pvesm free "$efi_storage_volume"; then
-                    msg_error "Failed to remove existing volume => $efi_storage_volume"
+                    msg_error "Could not remove existing EFI volume => $efi_storage_volume"
                     exit 1
                 fi
 
-                # Allocate new EFI volume
                 msg_info "Allocating EFI => $efi_filename (size=$EFI_DISK_SIZE)"
                 pvesm alloc "$VM_STORAGE" "$VMID" "$efi_filename" "$EFI_DISK_SIZE" --format raw
 
-                # Attach as efidisk0
-                msg_info "Attaching EFI => $efi_storage_volume"
+                # Attach the EFI disk
                 qm set "$VMID" -efidisk0 "${efi_storage_volume},efitype=4m"
                 msg_ok "EFI disk created & attached => $efi_storage_volume"
                 break
             else
-                # "Next index"
-                msg_info "Skipping efi_index=$efi_index, trying efi_index=$((efi_index+1))"
-                ((efi_index++))
+                msg_info "User refused to overwrite existing EFI disk => Exiting."
+                exit_script
             fi
         else
-            # Volume does NOT exist => allocate it fresh
-            msg_info "Allocating EFI volume => $efi_filename (size=$EFI_DISK_SIZE)"
+            # fresh
+            msg_info "Allocating EFI => $efi_filename (size=$EFI_DISK_SIZE)"
             pvesm alloc "$VM_STORAGE" "$VMID" "$efi_filename" "$EFI_DISK_SIZE" --format raw
 
-            msg_info "Attaching EFI => $efi_storage_volume"
             qm set "$VMID" -efidisk0 "${efi_storage_volume},efitype=4m"
             msg_ok "EFI disk created & attached => $efi_storage_volume"
             break
@@ -919,79 +841,77 @@ function create_vm() {
     # 5) Main Disk
     ###########################################################################
     msg_info "Attaching main disk..."
-    # Force the main disk index to always be one higher than the EFI disk index
     local main_index=$((efi_index + 1))
 
     while true; do
         local main_filename="vm-${VMID}-disk-${main_index}${extension}"
         local main_storage_volume="${VM_STORAGE}:${main_filename}"
 
-        msg_info "Debug: Checking if main volume => $main_storage_volume"
+        msg_info "Debug: Checking main disk => $main_storage_volume"
         if volume_exists "$main_storage_volume"; then
             msg_info "Main disk volume '$main_storage_volume' already exists."
-            if (whiptail --title "Main Disk Exists" --yesno \
-                "Volume $main_storage_volume already exists.\n\nOverwrite it?\nThis will DESTROY existing data.\n\n(Yes=Overwrite / No=Next index)" \
-                12 70 --yes-button "Overwrite" --no-button "Next"); then
+            if whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                --title "Main Disk Exists" \
+                --yesno "Volume '$main_storage_volume' already exists.\n\nDo you want to overwrite it? (This will DESTROY all data on the disk.)" \
+                12 70 --yes-button "Overwrite" --no-button "Exit Script"; then
 
                 msg_info "Overwriting => $main_storage_volume"
                 if ! pvesm free "$main_storage_volume"; then
-                    msg_error "Failed to remove existing volume => $main_storage_volume"
+                    msg_error "Could not remove existing main volume => $main_storage_volume"
                     exit 1
                 fi
 
                 msg_info "Allocating main disk => $main_filename (size=$DISK_SIZE)"
                 pvesm alloc "$VM_STORAGE" "$VMID" "$main_filename" "$DISK_SIZE" --format raw
 
-                # Attempt scsi0 attach with retry logic
+                # Attach scsi0 with small retries
                 local attached=false
                 local RETRY_COUNT=5
-                local RETRY_DELAY=5
+                local RETRY_DELAY=3
 
-                for ((i=1; i<=RETRY_COUNT; i++)); do
-                    msg_info "Try #$i: qm set $VMID -scsi0 $main_storage_volume"
+                for ((attempt=1; attempt<=RETRY_COUNT; attempt++)); do
+                    msg_info "Attempt $attempt: qm set $VMID -scsi0 $main_storage_volume"
                     if qm set "$VMID" -scsi0 "$main_storage_volume"; then
                         msg_ok "Main disk attached => $main_storage_volume"
                         attached=true
                         break
                     else
-                        msg_error "Attach attempt #$i failed. Retrying in $RETRY_DELAY seconds..."
+                        msg_error "Attach attempt #$attempt failed. Retrying in $RETRY_DELAY sec..."
                         sleep $RETRY_DELAY
                     fi
                 done
 
                 if [ "$attached" = false ]; then
-                    msg_error "Could not attach main disk after $RETRY_COUNT tries."
+                    msg_error "Could not attach main disk after $RETRY_COUNT tries. Exiting."
                     exit 1
                 fi
                 break
             else
-                msg_info "Skipping main_index=$main_index, incrementing..."
-                ((main_index++))
+                msg_info "User refused to overwrite existing Main disk => Exiting."
+                exit_script
             fi
         else
-            # Fresh allocate
             msg_info "Allocating main disk => $main_filename (size=$DISK_SIZE)"
             pvesm alloc "$VM_STORAGE" "$VMID" "$main_filename" "$DISK_SIZE" --format raw
 
-            # Attach with a small retry loop
             local attached=false
             local RETRY_COUNT=5
-            local RETRY_DELAY=5
+            local RETRY_DELAY=3
 
-            for ((i=1; i<=RETRY_COUNT; i++)); do
-                msg_info "Try #$i: qm set $VMID -scsi0 $main_storage_volume"
+            for ((attempt=1; attempt<=RETRY_COUNT; attempt++)); do
+                msg_info "Attempt $attempt: qm set $VMID -scsi0 $main_storage_volume"
                 if qm set "$VMID" -scsi0 "$main_storage_volume"; then
                     msg_ok "Main disk attached => $main_storage_volume"
                     attached=true
                     break
                 else
-                    msg_error "Attach attempt #$i failed. Retrying..."
+                    msg_error "Attach attempt #$attempt failed. Retrying..."
                     sleep $RETRY_DELAY
                 fi
             done
 
             if [ "$attached" = false ]; then
-                msg_error "Could not attach main disk after $RETRY_COUNT tries."
+                msg_error "Could not attach main disk after $RETRY_COUNT tries. Exiting."
                 exit 1
             fi
             break
@@ -999,25 +919,23 @@ function create_vm() {
     done
 
     ###########################################################################
-    # 6) Attach ISO
+    # 6) Attach the OPNsense ISO
     ###########################################################################
-    msg_info "Attaching ISO => $ISO_STORAGE:iso/$ISO_FILE"
-    qm set "$VMID" -ide2 "$ISO_STORAGE:iso/$ISO_FILE,media=cdrom"
+    msg_info "Attaching ISO => $ISO_STORAGE:iso/$ISO_BASENAME"
+    qm set "$VMID" -ide2 "$ISO_STORAGE:iso/$ISO_BASENAME,media=cdrom"
 
     ###########################################################################
-    # 7) Boot order (semicolon in Proxmox 8)
+    # 7) Boot order => Proxmox 8 uses semicolon
     ###########################################################################
     msg_info "Setting boot order => ide2;scsi0"
     qm set "$VMID" -boot order="ide2;scsi0"
 
     ###########################################################################
-    # 8) Final housekeeping
+    # 8) Description
     ###########################################################################
-    local ISO_USED="$ISO_BASENAME"
-    qm set "$VMID" \
-      -description "# OPNsense - VM - $VMID - Created $CREATION_DATE - ISO Used: $ISO_USED</div><div align='center'><a href='https://opnsense.org/' target='_blank'><img src='https://icons.iconarchive.com/icons/simpleicons-team/simple/512/opnsense-icon.png'/></a><br><br>"
+    qm set "$VMID" -description "# OPNsense VM (ID=$VMID) - Created $CREATION_DATE - ISO Used: $ISO_BASENAME"
 
-    msg_ok "Created OPNsense VM ($HN) successfully!"
+    msg_ok "Created an OPNsense VM (ID=$VMID) successfully!"
 }
 
 function automate_install() {
@@ -1199,7 +1117,6 @@ function automate_install() {
     automate_setup "$LAN_IPV4" "$SUBNET_MASK" "$ENABLE_DHCP" "$DHCP_START" "$DHCP_END" "$ENABLE_HTTPS"
 }
 
-
 function automate_config_import() {
     msg_info "Starting automated configuration import..."
     # Wait for the VM to boot
@@ -1303,7 +1220,6 @@ function interactive_mount_config() {
 
     USB_STORAGE=$(select_usb_storage "Storage Pools" "Which storage pool would you like to use for the USB image?")
 
-
     create_and_attach_usb
 }
 
@@ -1359,7 +1275,7 @@ function create_and_attach_usb() {
 }
 
 #################################################################################
-# Main Script Execution                                                          #
+# Main Script Execution
 #################################################################################
 
 header_info
@@ -1375,11 +1291,12 @@ pushd "$TEMP_DIR" >/dev/null
 
 # Prompt user to proceed
 if ! whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "OPNsense VM" \
-    --yesno "This will create a New OPNsense VM. Proceed?" 10 58 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"; then
+    --yesno "This will create a New OPNsense VM. Proceed?" 10 58 \
+    --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"; then
     header_info && echo -e "User exited script.\n" && exit 1
 fi
 
-# Prompt to manage interfaces with "No" as the default option
+# Prompt to manage interfaces
 if ! whiptail --backtitle "Proxmox VE OPNsense Install Script" \
     --title "MANAGE PROXMOX INTERFACES" \
     --yesno "Would you like the script to manage and configure the Proxmox host network interfaces and add them to the VM?\nIf no, the VM will not have the predefined interfaces set." \
@@ -1389,28 +1306,30 @@ else
     MANAGE_INTERFACES="yes"
 fi
 
-# Gather user-defined settings (default or advanced)
+# Gather user-defined settings
 start_script
 
-ISO_STORAGE=$(select_iso_storage "ISO Storage" "Which storage pool would you like to use for the OPNsense ISO?")
-VM_STORAGE=$(select_disk_storage "VM Disk Storage" "Which storage pool would you like to use for ${HN}'s VM Disks?")
+# Now pick separate storages for ISO vs. VM disks:
+ISO_STORAGE=$(select_iso_storage)
+VM_STORAGE=$(select_disk_storage)
+msg_ok "Selected [$ISO_STORAGE] for ISO and [$VM_STORAGE] for VM Disks."
 
-msg_ok "Using $ISO_STORAGE for ISO Storage and $VM_STORAGE for VM Disks."
-msg_ok "Virtual Machine ID is $VMID."
-
-# Now pick an ISO (either local or downloaded) and proceed
+# Next pick the ISO (local or downloaded)
 select_iso
+
+# Create the VM (with Overwrite/Next logic for disks)
 create_vm
+
+# Optional config mount:
 prompt_mount_config
 
-# If you have chosen to automate the install, or start the VM anyway
+# Start if user asked:
 if [ "$START_VM" = "yes" ]; then
     if [ "$AUTOMATE_SETUP" = "yes" ]; then
         msg_info "Starting OPNsense VM"
         qm start "$VMID"
         msg_info "VM Started. Proceeding to automate the installation."
         automate_install
-        msg_info "(Installation automation functions were omitted per request.)"
     else
         msg_info "Starting OPNsense VM"
         qm start "$VMID"
@@ -1420,9 +1339,13 @@ else
     msg_info "VM creation complete. VM not started."
 fi
 
+# If also bridging on host
 if [ "$MANAGE_INTERFACES" = "yes" ]; then
     if (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --title "ADD INTERFACES" --defaultno --yesno "Would you like to add the interfaces to /etc/network/interfaces?" 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
+        --title "ADD INTERFACES" --defaultno \
+        --yesno "Would you like to add the interfaces to /etc/network/interfaces?" \
+        10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
+
         msg_info "Listing physical interfaces"
         PHYSICAL_INTERFACES=$(ip link show | grep -E '^[0-9]+:' | awk -F': ' '{print $2}')
         echo "Available physical interfaces:"
