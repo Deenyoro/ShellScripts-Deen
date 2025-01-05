@@ -1231,13 +1231,23 @@ function interactive_mount_config() {
 
     while true; do
         IMAGE_SIZE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Enter the size of the FAT32 image (e.g., 10M for 10 Megabytes):" 10 60 --title "IMAGE SIZE" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+            --inputbox "Enter the size of the FAT32 image (minimum 10M recommended, e.g., 10M for 10 Megabytes):" \
+            10 60 "10M" --title "IMAGE SIZE" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+
+        # If user pressed Enter without typing anything, default to 10M
+        if [[ -z "$IMAGE_SIZE" ]]; then
+            IMAGE_SIZE="10M"
+        fi
+
+        # Extract the numeric portion if it matches "<number>M"
         IMAGE_SIZE_NUM=$(echo "$IMAGE_SIZE" | sed -E 's/^([0-9]+)M$/\1/')
-        if [[ -n "$IMAGE_SIZE_NUM" ]]; then
+    
+        # Check if it's valid and at least 10
+        if [[ -n "$IMAGE_SIZE_NUM" && "$IMAGE_SIZE_NUM" -ge 10 ]]; then
             msg_ok "Image size set to $IMAGE_SIZE."
             break
         else
-            msg_error "SIZE should be in the format of <number>M (e.g., 10M). Please try again."
+            msg_error "SIZE must be in the format <number>M and at least 10M (e.g., 10M). Please try again."
         fi
     done
 
