@@ -1314,7 +1314,7 @@ function create_and_attach_usb() {
         msg_error "Failed to format USB disk as FAT32"
         pvesm free "${disk_path}"
         exit 1
-    }
+    fi  # <-- This was the problem, had a } instead of fi
 
     # Create a temporary mount point
     local mount_point
@@ -1326,7 +1326,7 @@ function create_and_attach_usb() {
         rm -rf "${mount_point}"
         pvesm free "${disk_path}"
         exit 1
-    }
+    fi
 
     # Create config directory and copy file
     mkdir -p "${mount_point}/conf"
@@ -1336,7 +1336,7 @@ function create_and_attach_usb() {
         rm -rf "${mount_point}"
         pvesm free "${disk_path}"
         exit 1
-    }
+    fi
 
     # Unmount
     sync
@@ -1356,14 +1356,14 @@ function create_and_attach_usb() {
         msg_error "No available virtio slots"
         pvesm free "${disk_path}"
         exit 1
-    }
+    fi
 
     # Attach the disk to the VM
     if ! qm set "${VMID}" --"${virtio_slot}" "${disk_path}"; then
         msg_error "Failed to attach USB disk to VM"
         pvesm free "${disk_path}"
         exit 1
-    }
+    fi
 
     msg_ok "Config USB disk created and attached successfully"
 }
