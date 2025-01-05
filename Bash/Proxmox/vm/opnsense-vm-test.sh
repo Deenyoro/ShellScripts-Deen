@@ -1231,29 +1231,35 @@ function interactive_mount_config() {
 
     while true; do
         IMAGE_SIZE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Enter the size of the FAT32 image (minimum 10M recommended, e.g., 10M for 10 Megabytes):" \
-            10 60 "10M" --title "IMAGE SIZE" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+            --inputbox "Enter the size of the FAT32 image (minimum 32M recommended, e.g., 32M for 32 Megabytes):" \
+            10 60 "32M" --title "IMAGE SIZE" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
 
-        # If user pressed Enter without typing anything, default to 10M
+        # If the user pressed Enter with nothing, default to 32M
         if [[ -z "$IMAGE_SIZE" ]]; then
-            IMAGE_SIZE="10M"
+            IMAGE_SIZE="32M"
         fi
 
         # Extract the numeric portion if it matches "<number>M"
         IMAGE_SIZE_NUM=$(echo "$IMAGE_SIZE" | sed -E 's/^([0-9]+)M$/\1/')
     
-        # Check if it's valid and at least 10
-        if [[ -n "$IMAGE_SIZE_NUM" && "$IMAGE_SIZE_NUM" -ge 10 ]]; then
+        # Check if it's valid and at least 32
+        if [[ -n "$IMAGE_SIZE_NUM" && "$IMAGE_SIZE_NUM" -ge 32 ]]; then
             msg_ok "Image size set to $IMAGE_SIZE."
             break
         else
-            msg_error "SIZE must be in the format <number>M and at least 10M (e.g., 10M). Please try again."
+            msg_error "SIZE must be at least 32M (e.g., 32M). Please try again."
         fi
     done
 
     while true; do
         USB_LABEL=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Enter the volume label for the FAT32 USB image:" 10 60 --title "USB LABEL" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+            --inputbox "Enter the volume label for the FAT32 USB image:" \
+            10 60 "CONFIG" --title "USB LABEL" --cancel-button "Exit Script" \
+            3>&1 1>&2 2<&3) || exit_script
+
+        # Force uppercase
+        USB_LABEL=$(echo "$USB_LABEL" | tr '[:lower:]' '[:upper:]')
+
         if [[ -n "$USB_LABEL" ]]; then
             msg_ok "USB volume label set to '$USB_LABEL'."
             break
