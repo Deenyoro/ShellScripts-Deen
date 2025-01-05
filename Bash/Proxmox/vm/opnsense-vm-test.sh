@@ -1218,9 +1218,16 @@ function interactive_mount_config() {
     USB_LABEL=""
     STORAGE=""
 
+    # 1) Prompt for config.xml file
     while true; do
-        CONFIG_XML_PATH=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Enter the full path to your config.xml file:" 10 60 --title "CONFIG.XML PATH" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+        CONFIG_XML_PATH=$(whiptail \
+            --backtitle "Proxmox VE OPNsense Install Script" \
+            --inputbox "Enter the full path to your config.xml file:" \
+            10 60 \
+            --title "CONFIG.XML PATH" \
+            --cancel-button "Exit Script" \
+            3>&1 1>&2 2<&3) || exit_script
+
         if [[ -f "$CONFIG_XML_PATH" ]]; then
             msg_ok "Config.xml found at '$CONFIG_XML_PATH'."
             break
@@ -1229,35 +1236,43 @@ function interactive_mount_config() {
         fi
     done
 
+    # 2) Prompt for desired FAT32 image size (with 32M default)
     while true; do
-        IMAGE_SIZE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Enter the size of the FAT32 image (minimum 32M recommended, e.g., 32M for 32 Megabytes):" \
-            10 60 "32M" --title "IMAGE SIZE" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+        IMAGE_SIZE=$(whiptail \
+            --backtitle "Proxmox VE OPNsense Install Script" \
+            --inputbox "Enter the size of the FAT32 image (32M+ recommended):" \
+            10 60 "32M" \
+            --title "IMAGE SIZE" \
+            --cancel-button "Exit Script" \
+            3>&1 1>&2 2<&3) || exit_script
 
-        # If the user pressed Enter with nothing, default to 32M
+        # If empty, default to "32M"
         if [[ -z "$IMAGE_SIZE" ]]; then
             IMAGE_SIZE="32M"
         fi
 
         # Extract the numeric portion if it matches "<number>M"
         IMAGE_SIZE_NUM=$(echo "$IMAGE_SIZE" | sed -E 's/^([0-9]+)M$/\1/')
-    
-        # Check if it's valid and at least 32
+
+        # Must be at least 32
         if [[ -n "$IMAGE_SIZE_NUM" && "$IMAGE_SIZE_NUM" -ge 32 ]]; then
             msg_ok "Image size set to $IMAGE_SIZE."
             break
         else
-            msg_error "SIZE must be at least 32M (e.g., 32M). Please try again."
+            msg_error "Size must be at least 32M. Please try again."
         fi
     done
 
+    # 3) Prompt for USB label, default to "CONFIG" (uppercase enforced)
     while true; do
-        USB_LABEL=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+        USB_LABEL=$(whiptail \
+            --backtitle "Proxmox VE OPNsense Install Script" \
             --inputbox "Enter the volume label for the FAT32 USB image:" \
-            10 60 "CONFIG" --title "USB LABEL" --cancel-button "Exit Script" \
+            10 60 "CONFIG" \
+            --title "USB LABEL" \
+            --cancel-button "Exit Script" \
             3>&1 1>&2 2<&3) || exit_script
 
-        # Force uppercase
         USB_LABEL=$(echo "$USB_LABEL" | tr '[:lower:]' '[:upper:]')
 
         if [[ -n "$USB_LABEL" ]]; then
@@ -1268,44 +1283,142 @@ function interactive_mount_config() {
         fi
     done
 
+    # 4) Ask which storage to use for the USB (images)
     USB_STORAGE=$(select_usb_storage "Storage Pools" "Which storage pool would you like to use for the USB image?")
 
+    # 5) Now proceed to actually create the USB image and attach
     create_and_attach_usb
 }
 
 function create_and_attach_usb() {
     IMAGE_FILE="/tmp/opnsense_config.img"
 
+    # 1) Check how big the config.xml file is
+    #    This works on BSD (stat -f) or Linux (stat -c)
+    local CONFIG_SIZE
+    CONFIG_SIZE=$(stat -f %z "$CONFIG_XML_PATH" 2>/dev/null || stat -c %s "$CONFIG_XML_PATH")
+    if [[ -z "$CONFIG_SIZE" || "$CONFIG_SIZE" -le 0 ]]; then
+        msg_error "Unable to determine size of $CONFIG_XML_PATH. Exiting..."
+        exit 1
+    fi
+
+    # 2) At least 1 MiB overhead + 32 MiB buffer for FAT32 overhead
+    #    so if your config is 100 KB, we create a partition that is
+    #    at least config_size + 1 MiB + 32 MiB => about 33 MiB
+    local MIN_SIZE=$((CONFIG_SIZE + 1*1024*1024 + 32*1024*1024))
+    local MIN_MB=$(( (MIN_SIZE + 1024*1024 - 1) / (1024*1024) ))  # round up
+
+    # Compare MIN_MB to the user’s chosen IMAGE_SIZE_NUM (like 32)
+    if [[ "$IMAGE_SIZE_NUM" -lt "$MIN_MB" ]]; then
+        # If the user’s entered size is too small,
+        # we automatically bump it up to MIN_MB
+        IMAGE_SIZE_NUM="$MIN_MB"
+        IMAGE_SIZE="${IMAGE_SIZE_NUM}M"
+        msg_info "Increasing FAT32 image size to $IMAGE_SIZE to accommodate $CONFIG_XML_PATH"
+    fi
+
     msg_info "Creating a $IMAGE_SIZE FAT32 image at $IMAGE_FILE..."
-    dd if=/dev/zero of="$IMAGE_FILE" bs=1M count="$IMAGE_SIZE_NUM" status=progress
+    if ! dd if=/dev/zero of="$IMAGE_FILE" bs=1M count="$IMAGE_SIZE_NUM" status=progress; then
+        msg_error "Failed to create $IMAGE_FILE"
+        exit 1
+    fi
 
     msg_info "Formatting the image as FAT32 with label '$USB_LABEL'..."
-    mkfs.vfat -F 32 -n "$USB_LABEL" "$IMAGE_FILE"
+    if ! mkfs.vfat -F 32 -n "$USB_LABEL" "$IMAGE_FILE"; then
+        msg_error "Failed to format $IMAGE_FILE as FAT32"
+        rm -f "$IMAGE_FILE"
+        exit 1
+    fi
 
     msg_info "Mounting the image..."
     MOUNT_POINT=$(mktemp -d)
     msg_info "Mount point created at $MOUNT_POINT."
-    mount -o loop "$IMAGE_FILE" "$MOUNT_POINT"
+
+    if ! mount -o loop "$IMAGE_FILE" "$MOUNT_POINT"; then
+        msg_error "Failed to mount $IMAGE_FILE"
+        rm -f "$IMAGE_FILE"
+        rmdir "$MOUNT_POINT"
+        exit 1
+    fi
 
     msg_info "Creating /conf directory and copying config.xml..."
-    mkdir -p "$MOUNT_POINT/conf"
-    cp "$CONFIG_XML_PATH" "$MOUNT_POINT/conf/config.xml"
+    if ! mkdir -p "$MOUNT_POINT/conf"; then
+        msg_error "Failed to create $MOUNT_POINT/conf directory"
+        umount "$MOUNT_POINT" || true
+        rm -f "$IMAGE_FILE"
+        rmdir "$MOUNT_POINT"
+        exit 1
+    fi
+
+    # Make sure we have enough free space on the mounted image to copy config.xml
+    local AVAILABLE_SPACE
+    AVAILABLE_SPACE=$(df -B1 "$MOUNT_POINT" | awk 'NR==2 {print $4}')
+    if [[ -z "$AVAILABLE_SPACE" ]]; then
+        msg_error "Could not determine available space on $MOUNT_POINT"
+        umount "$MOUNT_POINT" || true
+        rm -f "$IMAGE_FILE"
+        rmdir "$MOUNT_POINT"
+        exit 1
+    fi
+
+    if [[ "$AVAILABLE_SPACE" -lt "$CONFIG_SIZE" ]]; then
+        msg_error "Not enough space on FAT32 image. Need $CONFIG_SIZE B, have $AVAILABLE_SPACE B"
+        umount "$MOUNT_POINT" || true
+        rm -f "$IMAGE_FILE"
+        rmdir "$MOUNT_POINT"
+        exit 1
+    fi
+
+    if ! cp "$CONFIG_XML_PATH" "$MOUNT_POINT/conf/config.xml"; then
+        msg_error "Failed to copy $CONFIG_XML_PATH into $MOUNT_POINT/conf/"
+        umount "$MOUNT_POINT" || true
+        rm -f "$IMAGE_FILE"
+        rmdir "$MOUNT_POINT"
+        exit 1
+    fi
+
+    # Verify file was copied correctly
+    if ! cmp -s "$CONFIG_XML_PATH" "$MOUNT_POINT/conf/config.xml"; then
+        msg_error "Copied config.xml does not match the original!"
+        umount "$MOUNT_POINT" || true
+        rm -f "$IMAGE_FILE"
+        rmdir "$MOUNT_POINT"
+        exit 1
+    fi
 
     msg_info "Unmounting the image and cleaning up..."
-    umount "$MOUNT_POINT"
+    sync
+    if ! umount "$MOUNT_POINT"; then
+        msg_error "Failed to unmount $IMAGE_FILE from $MOUNT_POINT"
+        rmdir "$MOUNT_POINT"
+        rm -f "$IMAGE_FILE"
+        exit 1
+    fi
     rmdir "$MOUNT_POINT"
     msg_ok "Image unmounted and mount point removed."
 
     msg_info "Uploading the image to Proxmox storage..."
     DEST_PATH="/var/lib/vz/images/$VMID/opnsense_config.img"
-    mkdir -p "$(dirname "$DEST_PATH")"
-    cp "$IMAGE_FILE" "$DEST_PATH"
+    if ! mkdir -p "$(dirname "$DEST_PATH")"; then
+        msg_error "Failed to create directory: $(dirname "$DEST_PATH")"
+        rm -f "$IMAGE_FILE"
+        exit 1
+    fi
+
+    if ! cp "$IMAGE_FILE" "$DEST_PATH"; then
+        msg_error "Failed to copy $IMAGE_FILE to $DEST_PATH"
+        rm -f "$IMAGE_FILE"
+        exit 1
+    fi
     msg_ok "Image copied to $DEST_PATH."
 
+    # Remove local temp file
+    rm -f "$IMAGE_FILE"
+
     msg_info "Attaching the image to VM ID $VMID as a VirtIO disk..."
+    # Find an unused virtio slot
     EXISTING_VIRTIO=$(qm config "$VMID" | grep "^virtio" | awk -F: '{print $1}' | sort)
     VIRTIO_SLOT=""
-
     for i in {0..9}; do
         SLOT="virtio$i"
         if ! echo "$EXISTING_VIRTIO" | grep -q "^$SLOT"; then
@@ -1319,7 +1432,11 @@ function create_and_attach_usb() {
         exit 1
     fi
 
-    qm set "$VMID" --"$VIRTIO_SLOT" "$USB_STORAGE":/images/"$VMID"/opnsense_config.img,format=raw
+    if ! qm set "$VMID" --"$VIRTIO_SLOT" "$USB_STORAGE":/images/"$VMID"/opnsense_config.img,format=raw; then
+        msg_error "Failed to attach $DEST_PATH to VM $VMID"
+        exit 1
+    fi
+
     msg_ok "Image attached to VM ID $VMID as $VIRTIO_SLOT."
     msg_ok "OPNsense configuration USB image is ready and attached to VM ID $VMID as $VIRTIO_SLOT."
 }
