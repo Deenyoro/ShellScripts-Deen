@@ -955,13 +955,13 @@ function create_vm() {
     # 6) Attach the OPNsense ISO
     ###########################################################################
     msg_info "Attaching ISO => $ISO_STORAGE:iso/$ISO_BASENAME"
-    qm set "$VMID" -ide2 "$ISO_STORAGE:iso/$ISO_BASENAME,media=cdrom"
+    qm set "$VMID" -ide3 "$ISO_STORAGE:iso/$ISO_BASENAME,media=cdrom"
 
     ###########################################################################
     # 7) Boot order => Proxmox 8 uses semicolon
     ###########################################################################
-    msg_info "Setting boot order => ide2;scsi0"
-    qm set "$VMID" -boot order="ide2;scsi0"
+    msg_info "Setting boot order => ide3;scsi0"
+    qm set "$VMID" -boot order="ide3;scsi0"
 
     ###########################################################################
     # 8) Description
@@ -1083,7 +1083,7 @@ function automate_install() {
             sleep 2
         done
         # Remove CD boot device
-        qm set $VMID -delete ide2
+        qm set $VMID -delete ide3
         qm set $VMID -boot order=scsi0
         # Start the VM
         qm start $VMID
@@ -1334,14 +1334,14 @@ function create_and_attach_config() {
     # Clean up work directory
     rm -rf "${work_dir}"
 
-    # Attach the ISO to the VM as ide3
-    if ! qm set "${VMID}" --ide3 "${ISO_STORAGE}:iso/${iso_name},media=cdrom"; then
+    # Attach the ISO to the VM as ide2
+    if ! qm set "${VMID}" --ide2 "${ISO_STORAGE}:iso/${iso_name},media=cdrom"; then
         msg_error "Failed to attach config image to VM"
         rm -f "${iso_storage_path}/${iso_name}"
         exit 1
     fi
 
-    msg_ok "Config image created and attached as ide3"
+    msg_ok "Config image created and attached as ide2"
 }
 
 #################################################################################
