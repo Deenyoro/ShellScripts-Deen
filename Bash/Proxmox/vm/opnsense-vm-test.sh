@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Purpose: Automate the creation of an OPNsense VM in Proxmox VE
-# Dependencies: wget, curl, whiptail, bunzip2, Proxmox CLI tools (qm, pvesm, pvesh)
+# Dependencies: wget, curl, whiptail, bunzip2, genisoimage, Proxmox CLI tools (qm, pvesm, pvesh)
 
 set -euo pipefail
 
@@ -113,7 +113,7 @@ trap cleanup EXIT
 #################################################################################
 
 function check_dependencies() {
-    local deps=(whiptail pvesh pvesm qm wget curl bunzip2)
+    local deps=(whiptail pvesh pvesm qm wget curl bunzip2 genisoimage)
     for cmd in "${deps[@]}"; do
         if ! command -v "$cmd" &>/dev/null; then
             msg_error "Required command '$cmd' is not installed."
@@ -1289,77 +1289,60 @@ function interactive_mount_config() {
     USB_STORAGE=$(select_usb_storage "Storage Pools" "Which storage pool would you like to use for the USB image?")
 
     # 5) Now proceed to actually create the USB image and attach
-    create_and_attach_usb
+    create_and_attach_config
 }
 
-function create_and_attach_usb() {
-    # Create a raw disk image directly in the VM's storage
-    local disk_name="vm-${VMID}-disk-2"  # Use disk-2 since disk-0 is EFI and disk-1 is main disk
-    local disk_path="${USB_STORAGE}:${disk_name}"
+function create_and_attach_config() {
+    local iso_name="config-${VMID}.iso"
+    local work_dir=$(mktemp -d)
     
-    msg_info "Creating USB disk image..."
+    msg_info "Creating temporary work directory..."
     
-    # Allocate the disk
-    if ! pvesm alloc "${USB_STORAGE}" "${VMID}" "${disk_name}" "32M" --format raw; then
-        msg_error "Failed to allocate USB disk"
-        exit 1
-    fi
-
-    # Get the real path to the disk
-    local real_path
-    real_path=$(pvesm path "${disk_path}")
+    # Create the directory structure
+    mkdir -p "${work_dir}/conf"
     
-    # Format it as FAT32
-    if ! mkfs.vfat -F 32 -n "${USB_LABEL}" "${real_path}"; then
-        msg_error "Failed to format USB disk as FAT32"
-        pvesm free "${disk_path}"
-        exit 1
-    fi
-
-    # Create a temporary mount point
-    local mount_point
-    mount_point=$(mktemp -d)
-    
-    # Mount the image
-    if ! mount -o loop "${real_path}" "${mount_point}"; then
-        msg_error "Failed to mount USB disk"
-        rm -rf "${mount_point}"
-        pvesm free "${disk_path}"
-        exit 1
-    fi
-
-    # Create config directory and copy file - using backslashes for OPNsense compatibility
-    mkdir -p "${mount_point}/conf"
-    if ! cp "${CONFIG_XML_PATH}" "${mount_point}/conf/config.xml"; then
+    # Copy the config file
+    if ! cp "${CONFIG_XML_PATH}" "${work_dir}/conf/config.xml"; then
         msg_error "Failed to copy config file"
-        umount "${mount_point}"
-        rm -rf "${mount_point}"
-        pvesm free "${disk_path}"
+        rm -rf "${work_dir}"
         exit 1
     fi
 
-    # Verify the config file exists in the correct location
-    if [ ! -f "${mount_point}/conf/config.xml" ]; then
-        msg_error "Config file not found at expected location after copy"
-        umount "${mount_point}"
-        rm -rf "${mount_point}"
-        pvesm free "${disk_path}"
+    # Create the ISO
+    msg_info "Creating ISO image..."
+    if ! genisoimage -o "${work_dir}/${iso_name}" -V "${USB_LABEL}" -r -J "${work_dir}"; then
+        msg_error "Failed to create ISO image"
+        rm -rf "${work_dir}"
         exit 1
     fi
 
-    # Unmount
-    sync
-    umount "${mount_point}"
-    rm -rf "${mount_point}"
-
-    # Attach the disk to the VM as scsi1
-    if ! qm set "${VMID}" --scsi1 "${disk_path}"; then
-        msg_error "Failed to attach USB disk to VM"
-        pvesm free "${disk_path}"
+    # Move ISO to storage
+    local iso_storage_path
+    if [ "$ISO_STORAGE" = "local" ]; then
+        iso_storage_path="/var/lib/vz/template/iso"
+    else
+        iso_storage_path="$(pvesm path "$ISO_STORAGE")/template/iso"
+    fi
+    
+    mkdir -p "$iso_storage_path"
+    
+    if ! mv "${work_dir}/${iso_name}" "${iso_storage_path}/${iso_name}"; then
+        msg_error "Failed to move ISO to storage"
+        rm -rf "${work_dir}"
         exit 1
     fi
 
-    msg_ok "Config USB disk created and attached as scsi1"
+    # Clean up work directory
+    rm -rf "${work_dir}"
+
+    # Attach the ISO to the VM as ide3 (since ide2 is used by the installation ISO)
+    if ! qm set "${VMID}" --ide3 "${ISO_STORAGE}:iso/${iso_name},media=cdrom"; then
+        msg_error "Failed to attach config ISO to VM"
+        rm -f "${iso_storage_path}/${iso_name}"
+        exit 1
+    fi
+
+    msg_ok "Config ISO created and attached as ide3"
 }
 
 #################################################################################
