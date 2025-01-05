@@ -1293,163 +1293,79 @@ function interactive_mount_config() {
 }
 
 function create_and_attach_usb() {
-    local IMAGE_FILE="/tmp/opnsense_config.img"
-
-    # 1) Check how big the config.xml file is
-    local CONFIG_SIZE
-    CONFIG_SIZE=$(stat -f %z "$CONFIG_XML_PATH" 2>/dev/null || stat -c %s "$CONFIG_XML_PATH")
-    if [[ -z "$CONFIG_SIZE" || "$CONFIG_SIZE" -le 0 ]]; then
-        msg_error "Unable to determine size of $CONFIG_XML_PATH. Exiting..."
+    # Create a raw disk image directly in the VM's storage
+    local disk_name="vm-${VMID}-usb0"
+    local disk_path="${USB_STORAGE}:${disk_name}"
+    
+    msg_info "Creating USB disk image..."
+    
+    # Allocate the disk
+    if ! pvesm alloc "${USB_STORAGE}" "${VMID}" "${disk_name}" "32M" --format raw; then
+        msg_error "Failed to allocate USB disk"
         exit 1
     fi
 
-    # 2) Calculate minimum size needed
-    local MIN_SIZE=$((CONFIG_SIZE + 1*1024*1024 + 32*1024*1024))
-    local MIN_MB=$(( (MIN_SIZE + 1024*1024 - 1) / (1024*1024) ))
-
-    # Ensure IMAGE_SIZE_NUM is properly set
-    if [[ -z "$IMAGE_SIZE_NUM" ]]; then
-        IMAGE_SIZE_NUM=32
-        IMAGE_SIZE="32M"
-    fi
-
-    if [[ "$IMAGE_SIZE_NUM" -lt "$MIN_MB" ]]; then
-        IMAGE_SIZE_NUM="$MIN_MB"
-        IMAGE_SIZE="${IMAGE_SIZE_NUM}M"
-        msg_info "Increasing FAT32 image size to $IMAGE_SIZE to accommodate $CONFIG_XML_PATH"
-    fi
-
-    # 3) Create the image file
-    msg_info "Creating a $IMAGE_SIZE FAT32 image at $IMAGE_FILE..."
-    if ! dd if=/dev/zero of="$IMAGE_FILE" bs=1M count="$IMAGE_SIZE_NUM" status=progress; then
-        msg_error "Failed to create $IMAGE_FILE"
+    # Get the real path to the disk
+    local real_path
+    real_path=$(pvesm path "${disk_path}")
+    
+    # Format it as FAT32
+    if ! mkfs.vfat -F 32 -n "${USB_LABEL}" "${real_path}"; then
+        msg_error "Failed to format USB disk as FAT32"
+        pvesm free "${disk_path}"
         exit 1
-    fi
+    }
 
-    # 4) Format as FAT32
-    msg_info "Formatting the image as FAT32 with label '$USB_LABEL'..."
-    if ! mkfs.vfat -F 32 -n "$USB_LABEL" "$IMAGE_FILE"; then
-        msg_error "Failed to format $IMAGE_FILE as FAT32"
-        rm -f "$IMAGE_FILE"
+    # Create a temporary mount point
+    local mount_point
+    mount_point=$(mktemp -d)
+    
+    # Mount the image
+    if ! mount -o loop "${real_path}" "${mount_point}"; then
+        msg_error "Failed to mount USB disk"
+        rm -rf "${mount_point}"
+        pvesm free "${disk_path}"
         exit 1
-    fi
+    }
 
-    # 5) Mount the image
-    local MOUNT_POINT
-    MOUNT_POINT=$(mktemp -d)
-    msg_info "Mount point created at $MOUNT_POINT."
-
-    if ! mount -o loop "$IMAGE_FILE" "$MOUNT_POINT"; then
-        msg_error "Failed to mount $IMAGE_FILE"
-        rm -f "$IMAGE_FILE"
-        rmdir "$MOUNT_POINT"
+    # Create config directory and copy file
+    mkdir -p "${mount_point}/conf"
+    if ! cp "${CONFIG_XML_PATH}" "${mount_point}/conf/config.xml"; then
+        msg_error "Failed to copy config file"
+        umount "${mount_point}"
+        rm -rf "${mount_point}"
+        pvesm free "${disk_path}"
         exit 1
-    fi
+    }
 
-    # 6) Create conf directory and copy config
-    msg_info "Creating /conf directory and copying config.xml..."
-    if ! mkdir -p "$MOUNT_POINT/conf"; then
-        msg_error "Failed to create $MOUNT_POINT/conf directory"
-        umount "$MOUNT_POINT" || true
-        rm -f "$IMAGE_FILE"
-        rmdir "$MOUNT_POINT"
-        exit 1
-    fi
-
-    # 7) Check available space
-    local AVAILABLE_SPACE
-    AVAILABLE_SPACE=$(df -B1 "$MOUNT_POINT" | awk 'NR==2 {print $4}')
-    if [[ -z "$AVAILABLE_SPACE" ]]; then
-        msg_error "Could not determine available space on $MOUNT_POINT"
-        umount "$MOUNT_POINT" || true
-        rm -f "$IMAGE_FILE"
-        rmdir "$MOUNT_POINT"
-        exit 1
-    fi
-
-    if [[ "$AVAILABLE_SPACE" -lt "$CONFIG_SIZE" ]]; then
-        msg_error "Not enough space on FAT32 image. Need $CONFIG_SIZE B, have $AVAILABLE_SPACE B"
-        umount "$MOUNT_POINT" || true
-        rm -f "$IMAGE_FILE"
-        rmdir "$MOUNT_POINT"
-        exit 1
-    fi
-
-    # 8) Copy the config file
-    if ! cp "$CONFIG_XML_PATH" "$MOUNT_POINT/conf/config.xml"; then
-        msg_error "Failed to copy $CONFIG_XML_PATH into $MOUNT_POINT/conf/"
-        umount "$MOUNT_POINT" || true
-        rm -f "$IMAGE_FILE"
-        rmdir "$MOUNT_POINT"
-        exit 1
-    fi
-
-    # 9) Verify the copy
-    if ! cmp -s "$CONFIG_XML_PATH" "$MOUNT_POINT/conf/config.xml"; then
-        msg_error "Copied config.xml does not match the original!"
-        umount "$MOUNT_POINT" || true
-        rm -f "$IMAGE_FILE"
-        rmdir "$MOUNT_POINT"
-        exit 1
-    fi
-
-    # 10) Unmount and cleanup
-    msg_info "Unmounting the image and cleaning up..."
+    # Unmount
     sync
-    if ! umount "$MOUNT_POINT"; then
-        msg_error "Failed to unmount $IMAGE_FILE from $MOUNT_POINT"
-        rmdir "$MOUNT_POINT"
-        rm -f "$IMAGE_FILE"
-        exit 1
-    fi
-    rmdir "$MOUNT_POINT"
-    msg_ok "Image unmounted and mount point removed."
+    umount "${mount_point}"
+    rm -rf "${mount_point}"
 
-    # 11) Move to final location
-    local DEST_PATH="/var/lib/vz/images/${VMID}/opnsense_config.img"
-    if ! mkdir -p "$(dirname "$DEST_PATH")"; then
-        msg_error "Failed to create directory: $(dirname "$DEST_PATH")"
-        rm -f "$IMAGE_FILE"
-        exit 1
-    fi
-
-    if ! cp "$IMAGE_FILE" "$DEST_PATH"; then
-        msg_error "Failed to copy $IMAGE_FILE to $DEST_PATH"
-        rm -f "$IMAGE_FILE"
-        exit 1
-    fi
-    msg_ok "Image copied to $DEST_PATH."
-
-    # Cleanup temp file
-    rm -f "$IMAGE_FILE"
-
-    # 12) Attach to VM
-    msg_info "Attaching the image to VM ID $VMID as a VirtIO disk..."
-    local EXISTING_VIRTIO
-    EXISTING_VIRTIO=$(qm config "$VMID" | grep "^virtio" | awk -F: '{print $1}' | sort)
-    local VIRTIO_SLOT=""
-
+    # Find next available virtio slot
+    local virtio_slot=""
     for i in {0..9}; do
-        local SLOT="virtio$i"
-        if ! echo "$EXISTING_VIRTIO" | grep -q "^$SLOT"; then
-            VIRTIO_SLOT="$SLOT"
+        if ! qm config "${VMID}" | grep -q "^virtio${i}:"; then
+            virtio_slot="virtio${i}"
             break
         fi
     done
 
-    if [[ -z "$VIRTIO_SLOT" ]]; then
-        msg_error "No available VirtIO slots found for VM ID $VMID."
+    if [ -z "${virtio_slot}" ]; then
+        msg_error "No available virtio slots"
+        pvesm free "${disk_path}"
         exit 1
-    fi
+    }
 
-    # Fixed storage path format
-    if ! qm set "$VMID" --"$VIRTIO_SLOT" "${USB_STORAGE}:images/${VMID}/opnsense_config.img,format=raw"; then
-        msg_error "Failed to attach image to VM $VMID"
+    # Attach the disk to the VM
+    if ! qm set "${VMID}" --"${virtio_slot}" "${disk_path}"; then
+        msg_error "Failed to attach USB disk to VM"
+        pvesm free "${disk_path}"
         exit 1
-    fi
+    }
 
-    msg_ok "Image attached to VM ID $VMID as $VIRTIO_SLOT."
-    msg_ok "OPNsense configuration USB image is ready and attached to VM ID $VMID as $VIRTIO_SLOT."
+    msg_ok "Config USB disk created and attached successfully"
 }
 
 #################################################################################
