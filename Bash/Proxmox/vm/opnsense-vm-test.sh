@@ -1294,7 +1294,7 @@ function interactive_mount_config() {
 
 function create_and_attach_usb() {
     # Create a raw disk image directly in the VM's storage
-    local disk_name="vm-${VMID}-usb0"
+    local disk_name="vm-${VMID}-disk-2"  # Use disk-2 since disk-0 is EFI and disk-1 is main disk
     local disk_path="${USB_STORAGE}:${disk_name}"
     
     msg_info "Creating USB disk image..."
@@ -1314,7 +1314,7 @@ function create_and_attach_usb() {
         msg_error "Failed to format USB disk as FAT32"
         pvesm free "${disk_path}"
         exit 1
-    fi  # <-- This was the problem, had a } instead of fi
+    fi
 
     # Create a temporary mount point
     local mount_point
@@ -1328,10 +1328,19 @@ function create_and_attach_usb() {
         exit 1
     fi
 
-    # Create config directory and copy file
+    # Create config directory and copy file - using backslashes for OPNsense compatibility
     mkdir -p "${mount_point}/conf"
     if ! cp "${CONFIG_XML_PATH}" "${mount_point}/conf/config.xml"; then
         msg_error "Failed to copy config file"
+        umount "${mount_point}"
+        rm -rf "${mount_point}"
+        pvesm free "${disk_path}"
+        exit 1
+    fi
+
+    # Verify the config file exists in the correct location
+    if [ ! -f "${mount_point}/conf/config.xml" ]; then
+        msg_error "Config file not found at expected location after copy"
         umount "${mount_point}"
         rm -rf "${mount_point}"
         pvesm free "${disk_path}"
@@ -1343,29 +1352,14 @@ function create_and_attach_usb() {
     umount "${mount_point}"
     rm -rf "${mount_point}"
 
-    # Find next available virtio slot
-    local virtio_slot=""
-    for i in {0..9}; do
-        if ! qm config "${VMID}" | grep -q "^virtio${i}:"; then
-            virtio_slot="virtio${i}"
-            break
-        fi
-    done
-
-    if [ -z "${virtio_slot}" ]; then
-        msg_error "No available virtio slots"
-        pvesm free "${disk_path}"
-        exit 1
-    fi
-
-    # Attach the disk to the VM
-    if ! qm set "${VMID}" --"${virtio_slot}" "${disk_path}"; then
+    # Attach the disk to the VM as scsi1
+    if ! qm set "${VMID}" --scsi1 "${disk_path}"; then
         msg_error "Failed to attach USB disk to VM"
         pvesm free "${disk_path}"
         exit 1
     fi
 
-    msg_ok "Config USB disk created and attached successfully"
+    msg_ok "Config USB disk created and attached as scsi1"
 }
 
 #################################################################################
