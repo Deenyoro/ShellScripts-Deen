@@ -11,7 +11,7 @@ set -euo pipefail
 # Mirror and fallback settings
 MIRROR_BASE_URL="https://mirrors.ocf.berkeley.edu/opnsense/releases/"
 FALLBACK_URL="https://mirrors.ocf.berkeley.edu/opnsense/releases/25.1/OPNsense-devel-25.1.b-dvd-amd64.iso.bz2"
-FALLBACK_RELEASE_DATE="2024-Dec-18"
+FALLBACK_RELEASE_DATE="2024-Dec-18"  # Known release date for OPNsense 24.7
 FALLBACK_VERSION="25.1.b"
 
 # VM ID range
@@ -140,7 +140,7 @@ function error_handler() {
     local line_number="$1"
     local command="$2"
     echo -e "\n${RD}[ERROR]${CL} Line $line_number: exit code $exit_code while executing: $command\n"
-#    cleanup_vmid
+    cleanup_vmid
     exit $exit_code
 }
 
@@ -1250,10 +1250,17 @@ function automate_config_import() {
        	press_enter
 	# restart one more time
 	sleep 25
+	send_line_to_vm "exit"
+	press_enter
+	send_line_to_vm "6"
+	press_enter
+	sleep 100
+	# Force remove ISO from mount list
 	qm stop $VMID
 	until qm status $VMID | grep -q "stopped"; do
             sleep 2
         done
+	qm set $VMID -delete ide2
         qm start $VMID
         sleep 40
 	# Config Import completed
