@@ -1172,6 +1172,9 @@ function automate_config_import() {
         echo "Starting OPNsense setup with:"
         msg_info "Starting VM..."
         qm start $VMID
+        echo "Starting OPNsense setup with:"
+        msg_info "Starting VM..."
+        qm start $VMID
         # Wait for initial boot
         sleep 90
         msg_info "VM booted, sending installer command."
@@ -1248,22 +1251,35 @@ function automate_config_import() {
      	send_line_to_vm "cd0"
       	sleep 2
        	press_enter
-	# restart one more time
-	sleep 25
-	send_line_to_vm "exit"
-	press_enter
-	send_line_to_vm "6"
-	press_enter
-	sleep 100
-	# Force remove ISO from mount list
-	qm stop $VMID
-	until qm status $VMID | grep -q "stopped"; do
+        # After successful import, cleanup and restart
+        sleep 25
+        send_line_to_vm "exit"
+        press_enter
+        send_line_to_vm "6"
+        press_enter
+        sleep 100
+        # Force remove ISO from mount list
+        qm stop $VMID
+        until qm status $VMID | grep -q "stopped"; do
             sleep 2
         done
-	qm set $VMID -delete ide2
+        # Remove the mounted ISO and delete the ISO file
+        msg_info "Cleaning up configuration ISO..."
+        qm set $VMID -delete ide2
+        # Delete the actual ISO file
+        local iso_name="opnconfig-${VMID}.iso"
+        local iso_path
+        if [ "$ISO_STORAGE" = "local" ]; then
+            iso_path="/var/lib/vz/template/iso/${iso_name}"
+        else
+            iso_path="$(pvesm path "$ISO_STORAGE")/template/iso/${iso_name}"
+        fi
+        rm -f "$iso_path"
+        # Start the VM again
         qm start $VMID
         sleep 40
-	# Config Import completed
+        # Config Import completed
+        msg_ok "Configuration import and cleanup completed"
 }
 
 function prompt_mount_config() {
@@ -1329,16 +1345,31 @@ function create_and_attach_config() {
     mkdir -p "${work_dir}/conf"
     
     # Copy the config file
+    msg_info "Copying config.xml to temporary location..."
     if ! cp "${CONFIG_XML_PATH}" "${work_dir}/conf/config.xml"; then
         msg_error "Failed to copy config file"
         rm -rf "${work_dir}"
         exit 1
     fi
 
+    # Verify the file was copied correctly
+    if ! [ -f "${work_dir}/conf/config.xml" ]; then
+        msg_error "Config file not found in expected location after copy"
+        rm -rf "${work_dir}"
+        exit 1
+    fi
+
     # Create the ISO
     msg_info "Creating configuration ISO..."
-    if ! genisoimage -o "${work_dir}/${iso_name}" -V "${CONFIG_LABEL}" -r -J "${work_dir}"; then
+    if ! genisoimage -quiet -o "${work_dir}/${iso_name}" -V "${CONFIG_LABEL}" -r -J "${work_dir}"; then
         msg_error "Failed to create config image"
+        rm -rf "${work_dir}"
+        exit 1
+    fi
+
+    # Verify ISO was created
+    if ! [ -f "${work_dir}/${iso_name}" ]; then
+        msg_error "ISO file not found after creation"
         rm -rf "${work_dir}"
         exit 1
     fi
@@ -1351,6 +1382,7 @@ function create_and_attach_config() {
         iso_storage_path="$(pvesm path "$ISO_STORAGE")/template/iso"
     fi
     
+    msg_info "Moving ISO to storage location..."
     mkdir -p "$iso_storage_path"
     
     if ! mv "${work_dir}/${iso_name}" "${iso_storage_path}/${iso_name}"; then
@@ -1359,10 +1391,18 @@ function create_and_attach_config() {
         exit 1
     fi
 
+    # Verify ISO exists in final location
+    if ! [ -f "${iso_storage_path}/${iso_name}" ]; then
+        msg_error "ISO file not found in final location"
+        rm -rf "${work_dir}"
+        exit 1
+    fi
+
     # Clean up work directory
     rm -rf "${work_dir}"
 
     # Attach the ISO to the VM as ide2
+    msg_info "Attaching configuration ISO to VM..."
     if ! qm set "${VMID}" --ide2 "${ISO_STORAGE}:iso/${iso_name},media=cdrom"; then
         msg_error "Failed to attach config image to VM"
         rm -f "${iso_storage_path}/${iso_name}"
