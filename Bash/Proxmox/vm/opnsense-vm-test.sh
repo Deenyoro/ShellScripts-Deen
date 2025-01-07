@@ -1169,12 +1169,8 @@ function automate_install() {
 }
 
 function automate_config_import() {
-        echo "Starting OPNsense setup with:"
         msg_info "Starting VM..."
-        qm start $VMID || true
-        echo "Starting OPNsense setup with:"
-        msg_info "Starting VM..."
-        qm start $VMID || true
+        qm status "$VMID" | grep -q "running" || qm start "$VMID"
         # Wait for initial boot
         sleep 90
         msg_info "VM booted, sending installer command."
@@ -1220,7 +1216,8 @@ function automate_config_import() {
         # Wait for reboot
         sleep 30
         # Stop the VM
-        qm stop $VMID || true
+        msg_info "Stopping VM..."
+        qm status "$VMID" | grep -q "stopped" || qm stop "$VMID"
         # Wait for stop
         until qm status $VMID | grep -q "stopped"; do
             sleep 2
@@ -1229,7 +1226,8 @@ function automate_config_import() {
         qm set $VMID -delete ide3
         qm set $VMID -boot order=scsi0
         # Start the VM
-        qm start $VMID || true
+        msg_info "Starting VM for configuration..."
+        qm status "$VMID" | grep -q "running" || qm start "$VMID"
         sleep 40
         # Login as root
         send_line_to_vm "root"
@@ -1257,15 +1255,21 @@ function automate_config_import() {
         press_enter
         send_line_to_vm "6"
         press_enter
+        sleep 2
+        send_line_to_vm "Y"
+        sleep 2
+        press_enter
         sleep 100
         # Force remove ISO from mount list
-        qm stop $VMID || true
+        msg_info "Stopping VM for cleanup..."
+        qm status "$VMID" | grep -q "stopped" || qm stop "$VMID"
         until qm status $VMID | grep -q "stopped"; do
             sleep 2
         done
         # Remove the mounted ISO and delete the ISO file
         msg_info "Cleaning up configuration ISO..."
         qm set $VMID -delete ide2
+        
         # Delete the actual ISO file
         local iso_name="opnconfig-${VMID}.iso"
         local iso_path
@@ -1274,9 +1278,16 @@ function automate_config_import() {
         else
             iso_path="$(pvesm path "$ISO_STORAGE")/template/iso/${iso_name}"
         fi
-        rm -f "$iso_path"
+        
+        if [ -f "$iso_path" ]; then
+            msg_info "Removing configuration ISO file..."
+            rm -f "$iso_path"
+            msg_ok "Configuration ISO removed"
+        fi
+        
         # Start the VM again
-        qm start $VMID || true
+        msg_info "Starting VM after configuration import..."
+        qm status "$VMID" | grep -q "running" || qm start "$VMID"
         sleep 40
         # Config Import completed
         msg_ok "Configuration import and cleanup completed"
@@ -1465,12 +1476,12 @@ prompt_mount_config
 if [ "$START_VM" = "yes" ]; then
     if [ "$AUTOMATE_SETUP" = "yes" ]; then
         msg_info "Starting OPNsense VM"
-        qm start "$VMID" || true
+        qm status "$VMID" | grep -q "running" || qm start "$VMID"
         msg_info "VM Started. Proceeding to automate the installation."
         automate_install
     else
         msg_info "Starting OPNsense VM"
-        qm start "$VMID" || true
+        qm status "$VMID" | grep -q "running" || qm start "$VMID"
         msg_ok "VM started."
     fi
 else
