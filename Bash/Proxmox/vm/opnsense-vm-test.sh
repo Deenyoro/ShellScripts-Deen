@@ -11,7 +11,7 @@ set -euo pipefail
 # Mirror and fallback settings
 MIRROR_BASE_URL="https://mirrors.ocf.berkeley.edu/opnsense/releases/"
 FALLBACK_URL="https://mirrors.ocf.berkeley.edu/opnsense/releases/25.1/OPNsense-devel-25.1.b-dvd-amd64.iso.bz2"
-FALLBACK_RELEASE_DATE="2024-Dec-18"  # Known release date for OPNsense 24.7
+FALLBACK_RELEASE_DATE="2024-Dec-18"
 FALLBACK_VERSION="25.1.b"
 
 # VM ID range
