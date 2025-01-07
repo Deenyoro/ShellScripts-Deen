@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Purpose: Automate the creation of an OPNsense VM in Proxmox VE
-# Dependencies: wget, curl, whiptail, bunzip2, genisoimage, Proxmox CLI tools (qm, pvesm, pvesh)
+# Dependencies: wget, curl, whiptail, bunzip2, genisoimage, xmlstarlet, Proxmox CLI tools (qm, pvesm, pvesh)
 
 set -euo pipefail
 
@@ -179,7 +179,6 @@ function check_dependencies() {
         [bunzip2]=bunzip2
         [genisoimage]=genisoimage
         [xmlstarlet]=xmlstarlet
-	[openssl]=openssl
     )
 
     # Array to hold missing packages
