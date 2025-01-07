@@ -67,6 +67,58 @@ function msg_error() {
 }
 
 #################################################################################
+# VM Interaction Functions                                                       #
+#################################################################################
+
+function send_line_to_vm() {
+    local line="$1"
+    for ((i = 0; i < ${#line}; i++)); do
+        character=${line:i:1}
+        case $character in
+            " ") character="spc" ;;
+            "-") character="minus" ;;
+            "=") character="equal" ;;
+            ",") character="comma" ;;
+            ".") character="dot" ;;
+            "/") character="slash" ;;
+            "'") character="apostrophe" ;;
+            ";") character="semicolon" ;;
+            '\\') character="backslash" ;;
+            '`') character="grave_accent" ;;
+            "[") character="bracket_left" ;;
+            "]") character="bracket_right" ;;
+            "_") character="shift-minus" ;;
+            "+") character="shift-equal" ;;
+            "?") character="shift-slash" ;;
+            "<") character="shift-comma" ;;
+            ">") character="shift-dot" ;;
+            '"') character="shift-apostrophe" ;;
+            ":") character="shift-semicolon" ;;
+            "|") character="shift-backslash" ;;
+            "~") character="shift-grave_accent" ;;
+            "{") character="shift-bracket_left" ;;
+            "}") character="shift-bracket_right" ;;
+            [A-Z]) character="shift-$(echo $character | tr 'A-Z' 'a-z')" ;;
+            "!") character="shift-1" ;;
+            "@") character="shift-2" ;;
+            "#") character="shift-3" ;;
+            '$') character="shift-4" ;;
+            "%") character="shift-5" ;;
+            "^") character="shift-6" ;;
+            "&") character="shift-7" ;;
+            "*") character="shift-8" ;;
+            "(") character="shift-9" ;;
+            ")") character="shift-0" ;;
+        esac
+        qm sendkey $VMID "$character"
+    done
+}
+
+function press_enter() {
+    qm sendkey $VMID ret
+}
+
+#################################################################################
 # Error Handling and Cleanup                                                     #
 #################################################################################
 
@@ -986,54 +1038,6 @@ function create_vm() {
 }
 
 function automate_install() {
-    function send_line_to_vm() {
-        local line="$1"
-        for ((i = 0; i < ${#line}; i++)); do
-            character=${line:i:1}
-            case $character in
-                " ") character="spc" ;;
-                "-") character="minus" ;;
-                "=") character="equal" ;;
-                ",") character="comma" ;;
-                ".") character="dot" ;;
-                "/") character="slash" ;;
-                "'") character="apostrophe" ;;
-                ";") character="semicolon" ;;
-                '\\') character="backslash" ;;
-                '`') character="grave_accent" ;;
-                "[") character="bracket_left" ;;
-                "]") character="bracket_right" ;;
-                "_") character="shift-minus" ;;
-                "+") character="shift-equal" ;;
-                "?") character="shift-slash" ;;
-                "<") character="shift-comma" ;;
-                ">") character="shift-dot" ;;
-                '"') character="shift-apostrophe" ;;
-                ":") character="shift-semicolon" ;;
-                "|") character="shift-backslash" ;;
-                "~") character="shift-grave_accent" ;;
-                "{") character="shift-bracket_left" ;;
-                "}") character="shift-bracket_right" ;;
-                [A-Z]) character="shift-$(echo $character | tr 'A-Z' 'a-z')" ;;
-                "!") character="shift-1" ;;
-                "@") character="shift-2" ;;
-                "#") character="shift-3" ;;
-                '$') character="shift-4" ;;
-                "%") character="shift-5" ;;
-                "^") character="shift-6" ;;
-                "&") character="shift-7" ;;
-                "*") character="shift-8" ;;
-                "(") character="shift-9" ;;
-                ")") character="shift-0" ;;
-            esac
-            qm sendkey $VMID "$character"
-        done
-    }
-
-    function press_enter() {
-        qm sendkey $VMID ret
-    }
-
     function automate_setup() {
         local LAN_IPV4=$1
         local SUBNET_MASK=$2
@@ -1165,53 +1169,6 @@ function automate_install() {
 }
 
 function automate_config_import() {
-    function send_line_to_vm() {
-        local line="$1"
-        for ((i = 0; i < ${#line}; i++)); do
-            character=${line:i:1}
-            case $character in
-                " ") character="spc" ;;
-                "-") character="minus" ;;
-                "=") character="equal" ;;
-                ",") character="comma" ;;
-                ".") character="dot" ;;
-                "/") character="slash" ;;
-                "'") character="apostrophe" ;;
-                ";") character="semicolon" ;;
-                '\\') character="backslash" ;;
-                '`') character="grave_accent" ;;
-                "[") character="bracket_left" ;;
-                "]") character="bracket_right" ;;
-                "_") character="shift-minus" ;;
-                "+") character="shift-equal" ;;
-                "?") character="shift-slash" ;;
-                "<") character="shift-comma" ;;
-                ">") character="shift-dot" ;;
-                '"') character="shift-apostrophe" ;;
-                ":") character="shift-semicolon" ;;
-                "|") character="shift-backslash" ;;
-                "~") character="shift-grave_accent" ;;
-                "{") character="shift-bracket_left" ;;
-                "}") character="shift-bracket_right" ;;
-                [A-Z]) character="shift-$(echo $character | tr 'A-Z' 'a-z')" ;;
-                "!") character="shift-1" ;;
-                "@") character="shift-2" ;;
-                "#") character="shift-3" ;;
-                '$') character="shift-4" ;;
-                "%") character="shift-5" ;;
-                "^") character="shift-6" ;;
-                "&") character="shift-7" ;;
-                "*") character="shift-8" ;;
-                "(") character="shift-9" ;;
-                ")") character="shift-0" ;;
-            esac
-            qm sendkey $VMID "$character"
-        done
-    }
-
-    function press_enter() {
-        qm sendkey $VMID ret
-    }
         echo "Starting OPNsense setup with:"
         msg_info "Starting VM..."
         qm start $VMID
@@ -1461,12 +1418,16 @@ prompt_mount_config
 if [ "$START_VM" = "yes" ]; then
     if [ "$AUTOMATE_SETUP" = "yes" ]; then
         msg_info "Starting OPNsense VM"
-        qm start "$VMID"
+        if ! qm status "$VMID" | grep -q "running"; then
+            qm start "$VMID"
+        fi
         msg_info "VM Started. Proceeding to automate the installation."
         automate_install
     else
         msg_info "Starting OPNsense VM"
-        qm start "$VMID"
+        if ! qm status "$VMID" | grep -q "running"; then
+            qm start "$VMID"
+        fi
         msg_ok "VM started."
     fi
 else
