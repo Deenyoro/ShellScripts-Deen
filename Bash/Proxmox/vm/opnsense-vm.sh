@@ -1124,7 +1124,7 @@ function automate_install() {
         echo "DHCP_END: $DHCP_END"
         echo "ENABLE_HTTPS: $ENABLE_HTTPS"
         # Wait for initial boot
-        sleep 90
+        sleep 150
         msg_info "VM booted, sending installer command."
         # Start the installer
         send_line_to_vm "installer"
@@ -1150,7 +1150,7 @@ function automate_install() {
         qm sendkey $VMID left
         press_enter
         # Wait for installation
-        sleep 200
+        sleep 333
         # Set root password
         press_enter
         sleep 2
@@ -1176,7 +1176,7 @@ function automate_install() {
         qm set $VMID -boot order=scsi0
         # Start the VM
         qm start $VMID
-        sleep 40
+        sleep 80
         # Login as root
         send_line_to_vm "root"
         sleep 2
@@ -1243,7 +1243,7 @@ function automate_config_import() {
         msg_info "Starting VM..."
         qm status "$VMID" | grep -q "running" || qm start "$VMID"
         # Wait for initial boot
-        sleep 90
+        sleep 150
         msg_info "VM booted, sending installer command."
         # Start the installer
         send_line_to_vm "installer"
@@ -1271,7 +1271,7 @@ function automate_config_import() {
         qm sendkey $VMID left
         press_enter
         # Wait for installation
-        sleep 200
+        sleep 333
         # Set root password
         press_enter
         sleep 2
@@ -1299,7 +1299,7 @@ function automate_config_import() {
         # Start the VM
         msg_info "Starting VM for configuration..."
         qm status "$VMID" | grep -q "running" || qm start "$VMID"
-        sleep 40
+        sleep 80
         # Login as root
         send_line_to_vm "root"
         sleep 2
@@ -1345,7 +1345,7 @@ function automate_config_import() {
         send_line_to_vm "Y"
         sleep 2
         press_enter
-        sleep 100
+        sleep 150
         # Force remove ISO from mount list
         msg_info "Stopping VM for cleanup..."
         qm status "$VMID" | grep -q "stopped" || qm stop "$VMID"
