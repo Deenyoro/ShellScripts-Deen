@@ -165,7 +165,7 @@ trap cleanup EXIT
 #################################################################################
 
 function check_dependencies() {
-    local deps=(whiptail pvesh pvesm qm wget curl bunzip2 genisoimage)
+    local deps=(whiptail pvesh pvesm qm wget curl bunzip2 genisoimage xmlstarlet)
     for cmd in "${deps[@]}"; do
         if ! command -v "$cmd" &>/dev/null; then
             msg_error "Required command '$cmd' is not installed."
@@ -1365,7 +1365,9 @@ function create_and_attach_config() {
 
     # Remove the root password line from the copied config file
     msg_info "Removing root password from configuration..."
-    if ! sed -i '/<user>.*<name>root<\/name>/,/<\/user>/s/<password>.*<\/password>//' "${work_dir}/conf/config.xml"; then
+
+    # Use xmlstarlet to delete the <password> element for the user with <name>root</name>
+    if ! xmlstarlet ed -L -d "//user[name='root']/password" "${work_dir}/conf/config.xml"; then
         msg_error "Failed to remove root password from configuration"
         rm -rf "${work_dir}"
         exit 1
