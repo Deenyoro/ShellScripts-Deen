@@ -540,7 +540,7 @@ function select_iso() {
 
     MENU_ITEMS=()
     # Always add fallback first
-    MENU_ITEMS+=("$FALLBACK_URL" "Fallback: OPNsense $FALLBACK_VERSION - Released: $FALLBACK_RELEASE_DATE")
+    MENU_ITEMS+=("$FALLBACK_URL" "OPNsense $FALLBACK_VERSION")
 
     if [ ${#ISO_ENTRIES[@]} -ne 0 ]; then
         local sorted_entries=()
@@ -554,7 +554,7 @@ function select_iso() {
 
         for entry in "${sorted_entries[@]}"; do
             IFS='|' read -r url filename date version <<< "$entry"
-            MENU_ITEMS+=("$url" "OPNsense $version - Released: $date")
+            MENU_ITEMS+=("$url" "OPNsense $version")
         done
     fi
 
@@ -852,17 +852,16 @@ function create_vm() {
 
         msg_info "Debug: Checking EFI disk => $efi_storage_volume"
         if volume_exists "$efi_storage_volume"; then
-            msg_info "EFI volume '$efi_storage_volume' already exists."
-            if whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-                --title "EFI Disk Exists" \
-                --yesno "Volume '$efi_storage_volume' already exists.\n\nDo you want to overwrite it? (This will DESTROY all data on the disk.)" \
-                12 70 --yes-button "Overwrite" --no-button "Exit Script"; then
-
-                msg_info "Overwriting => $efi_storage_volume"
-                if ! pvesm free "$efi_storage_volume"; then
-                    msg_error "Could not remove existing EFI volume => $efi_storage_volume"
-                    exit 1
-                fi
+    if whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+        --title "Create VM Disks" \
+        --yesno "Would you like to create the EFI disk?\n\nWarning: If a disk already exists with name '$efi_filename', it will be deleted." \
+        12 70 --yes-button "Create" --no-button "Exit Script"; then
+        
+        msg_info "Creating => $efi_storage_volume"
+        if ! pvesm free "$efi_storage_volume"; then
+            msg_error "Could not remove existing EFI volume => $efi_storage_volume"
+            exit 1
+        fi
 
                 msg_info "Allocating EFI => $efi_filename (size=$EFI_DISK_SIZE)"
                 pvesm alloc "$VM_STORAGE" "$VMID" "$efi_filename" "$EFI_DISK_SIZE" --format raw
@@ -898,17 +897,16 @@ function create_vm() {
 
         msg_info "Debug: Checking main disk => $main_storage_volume"
         if volume_exists "$main_storage_volume"; then
-            msg_info "Main disk volume '$main_storage_volume' already exists."
-            if whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-                --title "Main Disk Exists" \
-                --yesno "Volume '$main_storage_volume' already exists.\n\nDo you want to overwrite it? (This will DESTROY all data on the disk.)" \
-                12 70 --yes-button "Overwrite" --no-button "Exit Script"; then
-
-                msg_info "Overwriting => $main_storage_volume"
-                if ! pvesm free "$main_storage_volume"; then
-                    msg_error "Could not remove existing main volume => $main_storage_volume"
-                    exit 1
-                fi
+    if whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+        --title "Create VM Disks" \
+        --yesno "Would you like to create the main disk?\n\nWarning: If a disk already exists with name '$main_filename', it will be deleted." \
+        12 70 --yes-button "Create" --no-button "Exit Script"; then
+        
+        msg_info "Creating => $main_storage_volume"
+        if ! pvesm free "$main_storage_volume"; then
+            msg_error "Could not remove existing main volume => $main_storage_volume"
+            exit 1
+        fi
 
                 msg_info "Allocating main disk => $main_filename (size=$DISK_SIZE)"
                 pvesm alloc "$VM_STORAGE" "$VMID" "$main_filename" "$DISK_SIZE" --format raw
@@ -1293,6 +1291,15 @@ function automate_config_import() {
      	send_line_to_vm "cd0"
       	sleep 2
        	press_enter
+	# restart one more time
+	sleep 25
+	qm stop $VMID
+	until qm status $VMID | grep -q "stopped"; do
+            sleep 2
+        done
+        qm start $VMID
+        sleep 40
+	# Config Import completed
 }
 
 function prompt_mount_config() {
