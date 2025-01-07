@@ -309,25 +309,18 @@ function ssh_check() {
 #################################################################################
 # Distinct Functions for Selecting ISO Storage vs. VM Disk Storage
 #################################################################################
-# We explicitly filter for storages that have "iso" vs. "images" contents, so you
-# can pick one storage for the ISO and a different storage for VM Disks.
-#################################################################################
+# We explicitly filter for storages that have "iso" vs. "images" contents, so you can pick one storage for the ISO and a different storage for VM Disks.
 
 function select_iso_storage() {
     local title="ISO STORAGE"
     local prompt="Which storage pool would you like to use for the OPNsense ISO?"
-
     local menu_items=()
     while IFS= read -r line; do
-        # "pvesm status -content iso" => storages that can store ISOs
         [[ -z "$line" || "$line" =~ ^Name ]] && continue
-
         local tag=$(echo "$line" | awk '{print $1}')
         local stype=$(echo "$line" | awk '{print $2}')
         local free=$(echo "$line" | awk '{print $6}')
-
         [[ -z "$tag" ]] && continue
-
         local item="Type: $stype, Free: ${free}B"
         menu_items+=("$tag" "$item")
     done < <(pvesm status -content iso)
@@ -352,15 +345,11 @@ function select_disk_storage() {
 
     local menu_items=()
     while IFS= read -r line; do
-        # "pvesm status -content images" => storages for VM images
         [[ -z "$line" || "$line" =~ ^Name ]] && continue
-
         local tag=$(echo "$line" | awk '{print $1}')
         local stype=$(echo "$line" | awk '{print $2}')
         local free=$(echo "$line" | awk '{print $6}')
-
         [[ -z "$tag" ]] && continue
-
         local item="Type: $stype, Free: ${free}B"
         menu_items+=("$tag" "$item")
     done < <(pvesm status -content images)
@@ -375,25 +364,20 @@ function select_disk_storage() {
         --title "$title" \
         --menu "$prompt" 16 70 8 \
         "${menu_items[@]}" 3>&1 1>&2 2>&3) || exit_script
-
     echo "$chosen_storage"
 }
 
 function select_config_storage() {
     local title="$1"
     local prompt="$2"
-
     local menu_items=()
     # We look for storages that can hold ISOs
     while IFS= read -r line; do
         [[ -z "$line" || "$line" =~ ^Name ]] && continue
-
         local tag=$(echo "$line" | awk '{print $1}')
         local stype=$(echo "$line" | awk '{print $2}')
         local free=$(echo "$line" | awk '{print $6}')
-
         [[ -z "$tag" ]] && continue
-
         local item="Type: $stype, Free: ${free}B"
         menu_items+=("$tag" "$item")
     done < <(pvesm status -content iso)
@@ -593,7 +577,7 @@ function convert_date() {
 }
 
 #################################################################################
-# parse_available_versions / select_iso / handle_iso_download / select_local_iso
+# Functions for obtaining and handling ISOs
 #################################################################################
 
 function parse_available_versions() {
@@ -711,7 +695,7 @@ function handle_iso_download() {
         for entry in "${ISO_ENTRIES[@]}"; do
             IFS='|' read -r url filename date version <<< "$entry"
             if [ "$url" = "$chosen_url" ]; then
-                iso_basename="$filename"  # e.g. "20240723-OPNsense-24.7-dvd-amd64.iso.bz2"
+                iso_basename="$filename"
                 break
             fi
         done
@@ -722,10 +706,6 @@ function handle_iso_download() {
             iso_basename="${formatted_date}-$(basename "$FALLBACK_URL")"
         fi
     fi
-
-    # iso_basename is something like "20240723-OPNsense-24.7-dvd-amd64.iso.bz2"
-    # or just "OPNsense-24.7-dvd-amd64.iso.bz2"
-
     # Store it globally so create_vm can see it
     ISO_BASENAME="$iso_basename"
 
@@ -742,7 +722,7 @@ function handle_iso_download() {
     local base_no_bz2="${iso_basename%.bz2}" 
     local final_iso_name
     if [[ "$base_no_bz2" =~ \.iso$ ]]; then
-        # e.g. "20240723-OPNsense-24.7-dvd-amd64.iso"
+        # e.g. "20240723-OPNsense-24.7-dvd-amd64.iso" => do nothing
         final_iso_name="$base_no_bz2"
     else
         # e.g. "20240723-OPNsense-24.7-dvd-amd64" => append .iso
@@ -1034,7 +1014,7 @@ function create_vm() {
                 msg_info "Allocating main disk => $main_filename (size=$DISK_SIZE)"
                 pvesm alloc "$VM_STORAGE" "$VMID" "$main_filename" "$DISK_SIZE" --format raw
 
-                # Attach scsi0 with small retries
+                # Attach scsi0 with retries
                 local attached=false
                 local RETRY_COUNT=5
                 local RETRY_DELAY=3
@@ -1403,7 +1383,7 @@ function interactive_mount_config() {
     VM_ID="$VMID"
     CONFIG_STORAGE=""
 
-    # Just prompt for config.xml file
+    # Prompt for config.xml file
     while true; do
         CONFIG_XML_PATH=$(whiptail \
             --backtitle "Proxmox VE OPNsense Install Script" \
