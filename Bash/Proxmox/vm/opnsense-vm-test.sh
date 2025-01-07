@@ -1342,44 +1342,54 @@ function automate_config_import() {
         sleep 25
         send_line_to_vm "exit"
         press_enter
-        # send_line_to_vm "6"
-        # press_enter
-        # sleep 2
-        # send_line_to_vm "Y"
-        # sleep 2
-        # press_enter
-        # sleep 100
-	
-        ## Force remove ISO from mount list
-        #msg_info "Stopping VM for cleanup..."
-        #qm status "$VMID" | grep -q "stopped" || qm stop "$VMID"
-        #until qm status $VMID | grep -q "stopped"; do
-        #    sleep 2
-        #done
-        ## Remove the mounted ISO and delete the ISO file
-        #msg_info "Cleaning up configuration ISO..."
-        #qm set $VMID -delete ide2
-        
-        ## Delete the actual ISO file
-        #local iso_name="opnconfig-${VMID}.iso"
-        #local iso_path
-        #if [ "$ISO_STORAGE" = "local" ]; then
-        #    iso_path="/var/lib/vz/template/iso/${iso_name}"
-        #else
-        #    iso_path="$(pvesm path "$ISO_STORAGE")/template/iso/${iso_name}"
-        #fi
-        
-        #if [ -f "$iso_path" ]; then
-        #    msg_info "Removing configuration ISO file..."
-        #    rm -f "$iso_path"
-        #    msg_ok "Configuration ISO removed"
-        #fi
-        
-        ## Start the VM again
-        #msg_info "Starting VM after configuration import..."
-        #qm status "$VMID" | grep -q "running" || qm start "$VMID"
-        #sleep 40
-	
+	sleep 2
+	# Set root password again
+	send_line_to_vm "3"
+ 	press_enter
+  	sleep 2
+  	send_line_to_vm "y"
+   	press_enter
+    	sleep 2
+	send_line_to_vm "$ROOT_PASSWORD"
+        press_enter
+        sleep 2
+        send_line_to_vm "$ROOT_PASSWORD"
+        press_enter
+	sleep 2
+ 	# Reboot VM
+        send_line_to_vm "6"
+        press_enter
+        sleep 2
+        send_line_to_vm "Y"
+        sleep 2
+        press_enter
+        sleep 100
+        # Force remove ISO from mount list
+        msg_info "Stopping VM for cleanup..."
+        qm status "$VMID" | grep -q "stopped" || qm stop "$VMID"
+        until qm status $VMID | grep -q "stopped"; do
+        sleep 2
+        done
+        # Remove the mounted ISO and delete the ISO file
+        msg_info "Cleaning up configuration ISO..."
+        qm set $VMID -delete ide2
+        # Delete the actual ISO file
+        local iso_name="opnconfig-${VMID}.iso"
+        local iso_path
+        if [ "$ISO_STORAGE" = "local" ]; then
+            iso_path="/var/lib/vz/template/iso/${iso_name}"
+        else
+            iso_path="$(pvesm path "$ISO_STORAGE")/template/iso/${iso_name}"
+        fi
+        if [ -f "$iso_path" ]; then
+            msg_info "Removing configuration ISO file..."
+            rm -f "$iso_path"
+            msg_ok "Configuration ISO removed"
+        fi
+        # Start the VM again
+        msg_info "Starting VM after configuration import..."
+        qm status "$VMID" | grep -q "running" || qm start "$VMID"
+        sleep 40
         # Config Import completed
         msg_ok "Configuration import and cleanup completed"
 }
