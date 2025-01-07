@@ -196,6 +196,7 @@ function check_dependencies() {
         [bunzip2]=bunzip2
         [genisoimage]=genisoimage
         [xmlstarlet]=xmlstarlet
+	[openssl]=openssl
     )
 
     # Array to hold missing packages
