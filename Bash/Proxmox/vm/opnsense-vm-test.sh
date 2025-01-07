@@ -88,7 +88,7 @@ function error_handler() {
     local line_number="$1"
     local command="$2"
     echo -e "\n${RD}[ERROR]${CL} Line $line_number: exit code $exit_code while executing: $command\n"
-    cleanup_vmid
+#    cleanup_vmid
     exit $exit_code
 }
 
