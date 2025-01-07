@@ -165,13 +165,84 @@ trap cleanup EXIT
 #################################################################################
 
 function check_dependencies() {
+    # Define the list of required commands
     local deps=(whiptail pvesh pvesm qm wget curl bunzip2 genisoimage xmlstarlet)
+
+    # Map each command to its corresponding Debian package
+    declare -A cmd_pkg_map=(
+        [whiptail]=whiptail
+        [pvesh]=pve-manager
+        [pvesm]=pve-manager
+        [qm]=qemu-utils
+        [wget]=wget
+        [curl]=curl
+        [bunzip2]=bunzip2
+        [genisoimage]=genisoimage
+        [xmlstarlet]=xmlstarlet
+    )
+
+    # Array to hold missing packages
+    local missing_pkgs=()
+
+    # Iterate through each required command to check its existence
     for cmd in "${deps[@]}"; do
         if ! command -v "$cmd" &>/dev/null; then
-            msg_error "Required command '$cmd' is not installed."
-            exit 1
+            pkg=${cmd_pkg_map[$cmd]}
+            if [ -z "$pkg" ]; then
+                msg_error "No package mapping found for command '$cmd'. Please install it manually."
+                exit 1
+            fi
+            missing_pkgs+=("$pkg")
         fi
     done
+
+    # If no dependencies are missing, exit the function
+    if [ ${#missing_pkgs[@]} -eq 0 ]; then
+        msg_info "All required dependencies are already installed."
+        return 0
+    fi
+
+    # Flag to check if 'apt-get update' has been run
+    local updated=false
+
+    # Iterate through each missing package to prompt installation
+    for pkg in "${missing_pkgs[@]}"; do
+        while true; do
+            read -rp "Package '$pkg' is required but not installed. Install it now? (y/n): " choice
+            case "$choice" in
+                y|Y )
+                    # Run 'apt-get update' once before the first installation
+                    if [ "$updated" = false ]; then
+                        msg_info "Updating package lists..."
+                        if ! apt-get update; then
+                            msg_error "Failed to update package lists. Please check your network connection."
+                            exit 1
+                        fi
+                        updated=true
+                    fi
+
+                    # Install the package
+                    msg_info "Installing package '$pkg'..."
+                    if apt-get install -y "$pkg"; then
+                        msg_info "Package '$pkg' installed successfully."
+                    else
+                        msg_error "Failed to install package '$pkg'. Please install it manually."
+                        exit 1
+                    fi
+                    break
+                    ;;
+                n|N )
+                    msg_error "Required package '$pkg' is not installed. Exiting."
+                    exit 1
+                    ;;
+                * )
+                    echo "Please answer y (yes) or n (no)."
+                    ;;
+            esac
+        done
+    done
+
+    msg_info "All missing dependencies have been handled."
 }
 
 function check_vmid {
