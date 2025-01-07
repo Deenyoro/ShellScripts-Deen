@@ -66,6 +66,23 @@ function msg_error() {
     echo -e "${CROSS} ${RD}$1${CL}"
 }
 
+function generate_opnsense_hash() {
+    local password="$1"
+    local salt
+    local hash
+    
+    # Generate a random 16-byte salt
+    salt=$(openssl rand -hex 8)
+    
+    # Generate bcrypt hash (using openssl's format as base)
+    hash=$(echo -n "$password" | openssl passwd -6 -salt "$salt" -stdin)
+    
+    # Convert the hash to OPNsense format
+    hash='$2b$10$'$(echo "$hash" | cut -d'$' -f4)
+    
+    echo "$hash"
+}
+
 #################################################################################
 # VM Interaction Functions                                                       #
 #################################################################################
@@ -1370,12 +1387,12 @@ function prompt_mount_config() {
     if (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --title "MOUNT CONFIGURATION" \
         --yesno "Would you like to mount an OPNsense XML configuration file to the VM?" 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
+        msg_info "Root password will be needed for the configuration."
+        prompt_root_password
         interactive_mount_config
         if (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
             --title "AUTOMATE CONFIG IMPORT" \
             --yesno "Would you like the script to automatically import the configuration?" 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
-            msg_info "Root password will be needed for automated import."
-            prompt_root_password
             msg_info "Proceeding to automate configuration import..."
             automate_config_import
         else
@@ -1436,17 +1453,32 @@ function create_and_attach_config() {
         exit 1
     fi
 
-# Remove all <password> elements from <user> blocks in the copied config file
-msg_info "Removing all user passwords from configuration..."
+    # First blank out all user passwords
+    msg_info "Processing user passwords in configuration..."
 
-# Use xmlstarlet to delete all <password> elements within <user> blocks
-if ! xmlstarlet ed -L -d "//user/password" "${work_dir}/conf/config.xml"; then
-    msg_error "Failed to remove user passwords from configuration"
-    rm -rf "${work_dir}"
-    exit 1
-fi
+    # Blank all password fields
+    if ! xmlstarlet ed -L \
+        -u "//user/password" -v "" \
+        "${work_dir}/conf/config.xml"; then
+        msg_error "Failed to blank user passwords in configuration"
+        rm -rf "${work_dir}"
+        exit 1
+    fi
 
-msg_info "All user passwords removed successfully."
+    # Generate hash for root password
+    msg_info "Generating hash for root password..."
+    ROOT_HASH=$(generate_opnsense_hash "$ROOT_PASSWORD")
+
+    # Set the root user's password
+    if ! xmlstarlet ed -L \
+        -u "//user[name='root']/password" -v "$ROOT_HASH" \
+        "${work_dir}/conf/config.xml"; then
+        msg_error "Failed to set root password in configuration"
+        rm -rf "${work_dir}"
+        exit 1
+    fi
+
+    msg_info "Password processing completed successfully."
 
     # Verify the file was copied correctly
     if ! [ -f "${work_dir}/conf/config.xml" ]; then
