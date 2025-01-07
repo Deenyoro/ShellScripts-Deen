@@ -1331,35 +1331,37 @@ function automate_config_import() {
         sleep 2
         press_enter
         sleep 100
-        # Force remove ISO from mount list
-        msg_info "Stopping VM for cleanup..."
-        qm status "$VMID" | grep -q "stopped" || qm stop "$VMID"
-        until qm status $VMID | grep -q "stopped"; do
-            sleep 2
-        done
-        # Remove the mounted ISO and delete the ISO file
-        msg_info "Cleaning up configuration ISO..."
-        qm set $VMID -delete ide2
+	
+        ## Force remove ISO from mount list
+        #msg_info "Stopping VM for cleanup..."
+        #qm status "$VMID" | grep -q "stopped" || qm stop "$VMID"
+        #until qm status $VMID | grep -q "stopped"; do
+        #    sleep 2
+        #done
+        ## Remove the mounted ISO and delete the ISO file
+        #msg_info "Cleaning up configuration ISO..."
+        #qm set $VMID -delete ide2
         
-        # Delete the actual ISO file
-        local iso_name="opnconfig-${VMID}.iso"
-        local iso_path
-        if [ "$ISO_STORAGE" = "local" ]; then
-            iso_path="/var/lib/vz/template/iso/${iso_name}"
-        else
-            iso_path="$(pvesm path "$ISO_STORAGE")/template/iso/${iso_name}"
-        fi
+        ## Delete the actual ISO file
+        #local iso_name="opnconfig-${VMID}.iso"
+        #local iso_path
+        #if [ "$ISO_STORAGE" = "local" ]; then
+        #    iso_path="/var/lib/vz/template/iso/${iso_name}"
+        #else
+        #    iso_path="$(pvesm path "$ISO_STORAGE")/template/iso/${iso_name}"
+        #fi
         
-        if [ -f "$iso_path" ]; then
-            msg_info "Removing configuration ISO file..."
-            rm -f "$iso_path"
-            msg_ok "Configuration ISO removed"
-        fi
+        #if [ -f "$iso_path" ]; then
+        #    msg_info "Removing configuration ISO file..."
+        #    rm -f "$iso_path"
+        #    msg_ok "Configuration ISO removed"
+        #fi
         
-        # Start the VM again
-        msg_info "Starting VM after configuration import..."
-        qm status "$VMID" | grep -q "running" || qm start "$VMID"
-        sleep 40
+        ## Start the VM again
+        #msg_info "Starting VM after configuration import..."
+        #qm status "$VMID" | grep -q "running" || qm start "$VMID"
+        #sleep 40
+	
         # Config Import completed
         msg_ok "Configuration import and cleanup completed"
 }
@@ -1434,15 +1436,17 @@ function create_and_attach_config() {
         exit 1
     fi
 
-    # Remove the root password line from the copied config file
-    msg_info "Removing root password from configuration..."
+# Remove all <password> elements from <user> blocks in the copied config file
+msg_info "Removing all user passwords from configuration..."
 
-    # Use xmlstarlet to delete the <password> element for the user with <name>root</name>
-    if ! xmlstarlet ed -L -d "//user[name='root']/password" "${work_dir}/conf/config.xml"; then
-        msg_error "Failed to remove root password from configuration"
-        rm -rf "${work_dir}"
-        exit 1
-    fi
+# Use xmlstarlet to delete all <password> elements within <user> blocks
+if ! xmlstarlet ed -L -d "//user/password" "${work_dir}/conf/config.xml"; then
+    msg_error "Failed to remove user passwords from configuration"
+    rm -rf "${work_dir}"
+    exit 1
+fi
+
+msg_info "All user passwords removed successfully."
 
     # Verify the file was copied correctly
     if ! [ -f "${work_dir}/conf/config.xml" ]; then
