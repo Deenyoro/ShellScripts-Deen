@@ -66,23 +66,6 @@ function msg_error() {
     echo -e "${CROSS} ${RD}$1${CL}"
 }
 
-#function generate_opnsense_hash() {
-#    local password="$1"
-#    local salt
-#    local hash
-    
-#    # Generate a random 16-byte salt
-#    salt=$(openssl rand -hex 8)
-    
-#    # Generate bcrypt hash (using openssl's format as base)
-#    hash=$(echo -n "$password" | openssl passwd -6 -salt "$salt" -stdin)
-    
-#    # Convert the hash to OPNsense format
-#    hash='$2b$10$'$(echo "$hash" | cut -d'$' -f4)
-    
-#    echo "$hash"
-#}
-
 #################################################################################
 # VM Interaction Functions                                                       #
 #################################################################################
@@ -1475,19 +1458,6 @@ function create_and_attach_config() {
         rm -rf "${work_dir}"
         exit 1
     fi
-
-    ## Generate hash for root password
-    #msg_info "Generating hash for root password..."
-    #ROOT_HASH=$(generate_opnsense_hash "$ROOT_PASSWORD")
-
-    ## Set the root user's password
-    #if ! xmlstarlet ed -L \
-    #    -u "//user[name='root']/password" -v "$ROOT_HASH" \
-    #    "${work_dir}/conf/config.xml"; then
-    #    msg_error "Failed to set root password in configuration"
-    #    rm -rf "${work_dir}"
-    #    exit 1
-    #fi
 
     msg_info "Password processing completed successfully."
 
