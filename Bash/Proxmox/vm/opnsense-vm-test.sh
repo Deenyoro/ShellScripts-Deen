@@ -1171,10 +1171,10 @@ function automate_install() {
 function automate_config_import() {
         echo "Starting OPNsense setup with:"
         msg_info "Starting VM..."
-        qm start $VMID
+        qm start $VMID || true
         echo "Starting OPNsense setup with:"
         msg_info "Starting VM..."
-        qm start $VMID
+        qm start $VMID || true
         # Wait for initial boot
         sleep 90
         msg_info "VM booted, sending installer command."
@@ -1193,8 +1193,8 @@ function automate_config_import() {
         # Select disk
         sleep 10
         qm sendkey $VMID down
-	sleep 2
-	qm sendkey $VMID down
+        sleep 2
+        qm sendkey $VMID down
         press_enter
         # Confirm swap
         sleep 10
@@ -1220,7 +1220,7 @@ function automate_config_import() {
         # Wait for reboot
         sleep 30
         # Stop the VM
-        qm stop $VMID
+        qm stop $VMID || true
         # Wait for stop
         until qm status $VMID | grep -q "stopped"; do
             sleep 2
@@ -1229,7 +1229,7 @@ function automate_config_import() {
         qm set $VMID -delete ide3
         qm set $VMID -boot order=scsi0
         # Start the VM
-        qm start $VMID
+        qm start $VMID || true
         sleep 40
         # Login as root
         send_line_to_vm "root"
@@ -1238,19 +1238,19 @@ function automate_config_import() {
         send_line_to_vm "$ROOT_PASSWORD"
         sleep 2
         press_enter
-	# Import Config from Mounted ISO
+        # Import Config from Mounted ISO
         sleep 4
-	send_line_to_vm "8"
- 	sleep 2
-  	press_enter
-   	sleep 2
-  	send_line_to_vm "opnsense-importer"
-   	sleep 2
-    	press_enter
-     	sleep 2
-     	send_line_to_vm "cd0"
-      	sleep 2
-       	press_enter
+        send_line_to_vm "8"
+        sleep 2
+        press_enter
+        sleep 2
+        send_line_to_vm "opnsense-importer"
+        sleep 2
+        press_enter
+        sleep 2
+        send_line_to_vm "cd0"
+        sleep 2
+        press_enter
         # After successful import, cleanup and restart
         sleep 25
         send_line_to_vm "exit"
@@ -1259,7 +1259,7 @@ function automate_config_import() {
         press_enter
         sleep 100
         # Force remove ISO from mount list
-        qm stop $VMID
+        qm stop $VMID || true
         until qm status $VMID | grep -q "stopped"; do
             sleep 2
         done
@@ -1276,7 +1276,7 @@ function automate_config_import() {
         fi
         rm -f "$iso_path"
         # Start the VM again
-        qm start $VMID
+        qm start $VMID || true
         sleep 40
         # Config Import completed
         msg_ok "Configuration import and cleanup completed"
@@ -1465,16 +1465,12 @@ prompt_mount_config
 if [ "$START_VM" = "yes" ]; then
     if [ "$AUTOMATE_SETUP" = "yes" ]; then
         msg_info "Starting OPNsense VM"
-        if ! qm status "$VMID" | grep -q "running"; then
-            qm start "$VMID"
-        fi
+        qm start "$VMID" || true
         msg_info "VM Started. Proceeding to automate the installation."
         automate_install
     else
         msg_info "Starting OPNsense VM"
-        if ! qm status "$VMID" | grep -q "running"; then
-            qm start "$VMID"
-        fi
+        qm start "$VMID" || true
         msg_ok "VM started."
     fi
 else
