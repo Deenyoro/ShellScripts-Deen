@@ -1363,6 +1363,14 @@ function create_and_attach_config() {
         exit 1
     fi
 
+    # Remove the root password line from the copied config file
+    msg_info "Removing root password from configuration..."
+    if ! sed -i '/<user>.*<name>root<\/name>/,/<\/user>/s/<password>.*<\/password>//' "${work_dir}/conf/config.xml"; then
+        msg_error "Failed to remove root password from configuration"
+        rm -rf "${work_dir}"
+        exit 1
+    fi
+
     # Verify the file was copied correctly
     if ! [ -f "${work_dir}/conf/config.xml" ]; then
         msg_error "Config file not found in expected location after copy"
