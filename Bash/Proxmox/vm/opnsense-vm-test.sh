@@ -10,9 +10,9 @@ set -euo pipefail
 
 # Mirror and fallback settings
 MIRROR_BASE_URL="https://mirrors.ocf.berkeley.edu/opnsense/releases/"
-FALLBACK_URL="https://mirrors.ocf.berkeley.edu/opnsense/releases/24.7/OPNsense-24.7-dvd-amd64.iso.bz2"
-FALLBACK_RELEASE_DATE="2024-Jul-23"  # Known release date for OPNsense 24.7
-FALLBACK_VERSION="24.7"
+FALLBACK_URL="https://mirrors.ocf.berkeley.edu/opnsense/releases/25.1/OPNsense-devel-25.1.b-dvd-amd64.iso.bz2"
+FALLBACK_RELEASE_DATE="2024-Dec-18"  # Known release date for OPNsense 24.7
+FALLBACK_VERSION="25.1.b"
 
 # VM ID range
 STARTING_VM_ID=100
@@ -302,6 +302,7 @@ function exit_script() {
 function default_settings() {
     check_vmid
     VMID="$NEXTID"
+    BIOS_TYPE="ovmf"
     MACHINE="q35"
     DISK_CACHE=""
     HN="OPNsense$VMID"
@@ -338,10 +339,16 @@ function advanced_settings() {
         --inputbox "Hostname (Default: OPNsense$VMID)" 8 60 "OPNsense${VMID}" \
         --title "HOSTNAME" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
 
+    BIOS_TYPE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+        --title "FIRMWARE TYPE" --radiolist "Select firmware type:" 10 60 2 \
+        "ovmf" "OVMF (UEFI)" ON \
+        "seabios" "SeaBIOS (Legacy)" OFF \
+        3>&1 1>&2 2<&3 --cancel-button "Exit Script") || exit_script
+
     MACHINE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --title "MACHINE TYPE" --radiolist "Select machine type:" 10 60 2 \
         "q35" "Q35: Modern with PCIe support (recommended)" ON \
-        "i440fx" "Older, less feature-rich" OFF 3>&1 1>&2 2<&3 --cancel-button "Exit Script") || exit_script
+        "pc" "i440fx: Older, less feature-rich" OFF 3>&1 1>&2 2<&3 --cancel-button "Exit Script") || exit_script
 
     DISK_CACHE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --title "DISK CACHE" --radiolist "Disk cache type:" 10 60 2 \
@@ -469,62 +476,73 @@ function convert_date() {
 function parse_available_versions() {
     msg_info "Parsing available OPNsense versions from mirror"
     local html_content
-    # Attempt to fetch the main directory listing
     html_content=$(curl -s "$MIRROR_BASE_URL" || true)
 
     ISO_ENTRIES=()
     local version_dirs
 
-    # Example:
-    #   href="23.1/"
-    #   href="23.7/"
-    # We'll parse those version subfolders
+    # Modified pattern to catch all version formats
     version_dirs=$(echo "$html_content" \
-        | grep -oP 'href="\K[0-9]+\.[0-9]+(?=/)' \
+        | grep -oP 'href="\K[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:\.?[a-z]+)?(?=/)' \
         | sort -V || true)
+
+    echo "Debug: Found version directories: $version_dirs"
 
     for version in $version_dirs; do
         local version_url="${MIRROR_BASE_URL}${version}/"
         local version_content
         version_content=$(curl -s "$version_url" || true)
 
-        # We specifically look for the DVD ISO .bz2 file
-        # e.g. OPNsense-23.7-dvd-amd64.iso.bz2
-        if [[ "$version_content" =~ OPNsense-${version}-dvd-amd64\.iso\.bz2 ]]; then
-            local iso_file="OPNsense-${version}-dvd-amd64.iso.bz2"
+        echo "Debug: Checking $version_url"
 
-            # Attempt to extract a date from the listing (like 23-Jul-2023)
+        # Look for both regular and development ISOs
+        local iso_files
+        if echo "$version_content" | grep -q "OPNsense-devel-"; then
+            # Development version
+            iso_files=$(echo "$version_content" | grep -o 'OPNsense-devel-[^"]*-amd64\.iso\.bz2' || true)
+        else
+            # Regular version
+            iso_files=$(echo "$version_content" | grep -o 'OPNsense-[^"]*-dvd-amd64\.iso\.bz2' || true)
+        fi
+
+        while IFS= read -r iso_file; do
+            [[ -z "$iso_file" ]] && continue
+
+            echo "Debug: Found ISO file: $iso_file"
+
+            # Extract date from listing
             local date_part
             date_part=$(echo "$version_content" \
-                | grep "$iso_file" \
+                | grep -A1 "$iso_file" \
                 | grep -oP '\d{2}-[A-Za-z]{3}-\d{4}' || true)
 
             if [[ -z "$date_part" ]]; then
-                # If not found, default to today's date
                 date_part=$(date +"%d-%b-%Y")
             fi
+
+            echo "Debug: Release date: $date_part"
 
             # Convert date_part to YYYYMMDD
             local formatted_date
             formatted_date=$(convert_date "$(echo "$date_part" | awk -F'-' '{print $3"-"$2"-"$1}')")
 
-            # store an entry in the format:
-            #   url|filename_with_prefix|date_part|version
-            #   filename will be:
-            #   20230723-OPNsense-23.7-dvd-amd64.iso.bz2
+            # Store the full URL and other details
             ISO_ENTRIES+=("${version_url}${iso_file}|${formatted_date}-${iso_file}|${date_part}|${version}")
-        fi
+            echo "Debug: Added entry: ${version_url}${iso_file}|${formatted_date}-${iso_file}|${date_part}|${version}"
+        done <<< "$iso_files"
     done
+
+    echo "Debug: Total entries found: ${#ISO_ENTRIES[@]}"
 }
 
 function select_iso() {
     parse_available_versions
 
     MENU_ITEMS=()
-    if [ ${#ISO_ENTRIES[@]} -eq 0 ]; then
-        msg_info "No OPNsense ISOs found. Adding fallback to list."
-        MENU_ITEMS+=("$FALLBACK_URL" "Fallback OPNsense ISO: $(basename "$FALLBACK_URL") - Last Updated: $FALLBACK_RELEASE_DATE")
-    else
+    # Always add fallback first
+    MENU_ITEMS+=("$FALLBACK_URL" "Fallback: OPNsense $FALLBACK_VERSION - Released: $FALLBACK_RELEASE_DATE")
+
+    if [ ${#ISO_ENTRIES[@]} -ne 0 ]; then
         local sorted_entries=()
         for entry in "${ISO_ENTRIES[@]}"; do
             IFS='|' read -r url filename date version <<< "$entry"
@@ -538,8 +556,6 @@ function select_iso() {
             IFS='|' read -r url filename date version <<< "$entry"
             MENU_ITEMS+=("$url" "OPNsense $version - Released: $date")
         done
-
-        MENU_ITEMS+=("$FALLBACK_URL" "Fallback: OPNsense $FALLBACK_VERSION - Released: $FALLBACK_RELEASE_DATE")
     fi
 
     if (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
@@ -798,8 +814,8 @@ function create_vm() {
     qm create "$VMID" \
       -agent enabled=1 \
       -tablet 0 \
-      -bios ovmf \
-      -machine "$MACHINE" \
+      -bios "$BIOS_TYPE" \
+      -machine "type=$MACHINE" \
       -cpu "$CPU_TYPE" \
       -cores "$CORE_COUNT" \
       -memory "$RAM_SIZE" \
@@ -1151,43 +1167,120 @@ function automate_install() {
 }
 
 function automate_config_import() {
-    msg_info "Starting automated configuration import..."
-    # Wait for the VM to boot
-    sleep 90
-    msg_info "VM booted, proceeding with configuration import..."
+    function send_line_to_vm() {
+        local line="$1"
+        for ((i = 0; i < ${#line}; i++)); do
+            character=${line:i:1}
+            case $character in
+                " ") character="spc" ;;
+                "-") character="minus" ;;
+                "=") character="equal" ;;
+                ",") character="comma" ;;
+                ".") character="dot" ;;
+                "/") character="slash" ;;
+                "'") character="apostrophe" ;;
+                ";") character="semicolon" ;;
+                '\\') character="backslash" ;;
+                '`') character="grave_accent" ;;
+                "[") character="bracket_left" ;;
+                "]") character="bracket_right" ;;
+                "_") character="shift-minus" ;;
+                "+") character="shift-equal" ;;
+                "?") character="shift-slash" ;;
+                "<") character="shift-comma" ;;
+                ">") character="shift-dot" ;;
+                '"') character="shift-apostrophe" ;;
+                ":") character="shift-semicolon" ;;
+                "|") character="shift-backslash" ;;
+                "~") character="shift-grave_accent" ;;
+                "{") character="shift-bracket_left" ;;
+                "}") character="shift-bracket_right" ;;
+                [A-Z]) character="shift-$(echo $character | tr 'A-Z' 'a-z')" ;;
+                "!") character="shift-1" ;;
+                "@") character="shift-2" ;;
+                "#") character="shift-3" ;;
+                '$') character="shift-4" ;;
+                "%") character="shift-5" ;;
+                "^") character="shift-6" ;;
+                "&") character="shift-7" ;;
+                "*") character="shift-8" ;;
+                "(") character="shift-9" ;;
+                ")") character="shift-0" ;;
+            esac
+            qm sendkey $VMID "$character"
+        done
+    }
 
-    # Example login steps (keystrokes to log in as root):
-    # The real 'send_line_to_vm' and 'press_enter' functions would exist in your
-    # automate_install block. If you haven't pasted them, this is only conceptual.
-
-    # send_line_to_vm "root"
-    # sleep 2
-    # press_enter
-    # send_line_to_vm "$ROOT_PASSWORD"
-    # sleep 2
-    # press_enter
-    # sleep 2
-
-    # Launch importer
-    # send_line_to_vm "opnsense-importer"
-    # press_enter
-    # sleep 5
-
-    # Navigate and confirm
-    # qm sendkey "$VMID" down
-    # sleep 1
-    # press_enter
-    # sleep 5
-
-    # Confirm import
-    # press_enter
-    # sleep 30
-
-    # Reboot after import
-    # send_line_to_vm "reboot"
-    # press_enter
-
-    msg_ok "Configuration import automation completed."
+    function press_enter() {
+        qm sendkey $VMID ret
+    }
+        echo "Starting OPNsense setup with:"
+        msg_info "Starting VM..."
+        qm start $VMID
+        # Wait for initial boot
+        sleep 90
+        msg_info "VM booted, sending installer command."
+        # Start the installer
+        send_line_to_vm "installer"
+        press_enter
+        send_line_to_vm "opnsense"
+        press_enter
+        # Wait for keymap selection
+        sleep 10
+        press_enter
+        # Select install filesystem
+        sleep 10
+        qm sendkey $VMID down
+        press_enter
+        # Select disk
+        sleep 10
+        qm sendkey $VMID down
+	sleep 2
+	qm sendkey $VMID down
+        press_enter
+        # Confirm swap
+        sleep 10
+        press_enter
+        # Confirm destroy
+        sleep 5
+        qm sendkey $VMID left
+        press_enter
+        # Wait for installation
+        sleep 200
+        # Set root password
+        press_enter
+        sleep 2
+        send_line_to_vm "$ROOT_PASSWORD"
+        press_enter
+        sleep 2
+        send_line_to_vm "$ROOT_PASSWORD"
+        press_enter
+        # Confirm reboot
+        sleep 20
+        qm sendkey $VMID down
+        press_enter
+        # Wait for reboot
+        sleep 30
+        # Stop the VM
+        qm stop $VMID
+        # Wait for stop
+        until qm status $VMID | grep -q "stopped"; do
+            sleep 2
+        done
+        # Remove CD boot device
+        qm set $VMID -delete ide3
+        qm set $VMID -boot order=scsi0
+        # Start the VM
+        qm start $VMID
+        sleep 40
+        # Login as root
+        send_line_to_vm "root"
+        sleep 2
+        press_enter
+        send_line_to_vm "$ROOT_PASSWORD"
+        sleep 2
+        press_enter
+        sleep 2
 }
 
 function prompt_mount_config() {
@@ -1198,6 +1291,8 @@ function prompt_mount_config() {
         if (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
             --title "AUTOMATE CONFIG IMPORT" \
             --yesno "Would you like the script to automatically import the configuration?" 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
+            msg_info "Root password will be needed for automated import."
+            prompt_root_password
             msg_info "Proceeding to automate configuration import..."
             automate_config_import
         else
@@ -1212,13 +1307,10 @@ function prompt_mount_config() {
 
 function interactive_mount_config() {
     CONFIG_XML_PATH=""
-    IMAGE_SIZE=""
-    IMAGE_SIZE_NUM=""
     VM_ID="$VMID"
-    CONFIG_LABEL=""
     CONFIG_STORAGE=""
 
-    # 1) Prompt for config.xml file
+    # Just prompt for config.xml file
     while true; do
         CONFIG_XML_PATH=$(whiptail \
             --backtitle "Proxmox VE OPNsense Install Script" \
@@ -1236,63 +1328,16 @@ function interactive_mount_config() {
         fi
     done
 
-    # 2) Prompt for desired image size (with 32M default)
-    while true; do
-        IMAGE_SIZE=$(whiptail \
-            --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Enter the size of the configuration image (32M+ recommended):" \
-            10 60 "32M" \
-            --title "IMAGE SIZE" \
-            --cancel-button "Exit Script" \
-            3>&1 1>&2 2<&3) || exit_script
-
-        # If empty, default to "32M"
-        if [[ -z "$IMAGE_SIZE" ]]; then
-            IMAGE_SIZE="32M"
-            IMAGE_SIZE_NUM=32
-        fi
-
-        # Extract the numeric portion if it matches "<number>M"
-        IMAGE_SIZE_NUM=$(echo "$IMAGE_SIZE" | sed -E 's/^([0-9]+)M$/\1/')
-
-        # Must be at least 32
-        if [[ -n "$IMAGE_SIZE_NUM" && "$IMAGE_SIZE_NUM" -ge 32 ]]; then
-            msg_ok "Image size set to $IMAGE_SIZE."
-            break
-        else
-            msg_error "Size must be at least 32M. Please try again."
-        fi
-    done
-
-    # 3) Prompt for configuration label
-    while true; do
-        CONFIG_LABEL=$(whiptail \
-            --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Enter the volume label for the config image:" \
-            10 60 "CONFIG" \
-            --title "CONFIG LABEL" \
-            --cancel-button "Exit Script" \
-            3>&1 1>&2 2<&3) || exit_script
-
-        CONFIG_LABEL=$(echo "$CONFIG_LABEL" | tr '[:lower:]' '[:upper:]')
-
-        if [[ -n "$CONFIG_LABEL" ]]; then
-            msg_ok "Config image label set to '$CONFIG_LABEL'."
-            break
-        else
-            msg_error "Volume label cannot be empty. Please try again."
-        fi
-    done
-
-    # 4) Ask which storage to use for the configuration ISO
+    # Ask which storage to use for the configuration ISO
     CONFIG_STORAGE=$(select_config_storage "Configuration Storage Location" "Which storage pool should the config image be created in?")
 
-    # 5) Create and attach the configuration ISO
+    # Create and attach the configuration ISO
     create_and_attach_config
 }
 
 function create_and_attach_config() {
-    local iso_name="config-${VMID}.iso"
+    local CONFIG_LABEL="CONFIG"
+    local iso_name="opnconfig-${VMID}.iso"
     local work_dir=$(mktemp -d)
     
     msg_info "Creating temporary work directory..."
