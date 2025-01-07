@@ -1342,13 +1342,13 @@ function automate_config_import() {
         sleep 25
         send_line_to_vm "exit"
         press_enter
-        send_line_to_vm "6"
-        press_enter
-        sleep 2
-        send_line_to_vm "Y"
-        sleep 2
-        press_enter
-        sleep 100
+        # send_line_to_vm "6"
+        # press_enter
+        # sleep 2
+        # send_line_to_vm "Y"
+        # sleep 2
+        # press_enter
+        # sleep 100
 	
         ## Force remove ISO from mount list
         #msg_info "Stopping VM for cleanup..."
