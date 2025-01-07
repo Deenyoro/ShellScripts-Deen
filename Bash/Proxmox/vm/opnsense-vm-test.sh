@@ -1280,7 +1280,19 @@ function automate_config_import() {
         send_line_to_vm "$ROOT_PASSWORD"
         sleep 2
         press_enter
-        sleep 2
+	# Import Config from Mounted ISO
+        sleep 4
+	send_line_to_vm "8"
+ 	sleep 2
+  	press_enter
+   	sleep 2
+  	send_line_to_vm "opnsense-importer"
+   	sleep 2
+    	press_enter
+     	sleep 2
+     	send_line_to_vm "cd0"
+      	sleep 2
+       	press_enter
 }
 
 function prompt_mount_config() {
