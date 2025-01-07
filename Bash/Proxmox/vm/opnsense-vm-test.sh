@@ -302,7 +302,7 @@ function exit_script() {
 function default_settings() {
     check_vmid
     VMID="$NEXTID"
-    BIOS_TYPE="ovmf"
+    BIOS_TYPE="seabios"
     MACHINE="q35"
     DISK_CACHE=""
     HN="OPNsense$VMID"
@@ -341,8 +341,8 @@ function advanced_settings() {
 
     BIOS_TYPE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --title "FIRMWARE TYPE" --radiolist "Select firmware type:" 10 60 2 \
-        "ovmf" "OVMF (UEFI)" ON \
-        "seabios" "SeaBIOS (Legacy)" OFF \
+        "seabios" "SeaBIOS (Legacy)" ON \
+        "ovmf" "OVMF (UEFI)" OFF \
         3>&1 1>&2 2<&3 --cancel-button "Exit Script") || exit_script
 
     MACHINE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
