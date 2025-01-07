@@ -66,22 +66,22 @@ function msg_error() {
     echo -e "${CROSS} ${RD}$1${CL}"
 }
 
-function generate_opnsense_hash() {
-    local password="$1"
-    local salt
-    local hash
+#function generate_opnsense_hash() {
+#    local password="$1"
+#    local salt
+#    local hash
     
-    # Generate a random 16-byte salt
-    salt=$(openssl rand -hex 8)
+#    # Generate a random 16-byte salt
+#    salt=$(openssl rand -hex 8)
     
-    # Generate bcrypt hash (using openssl's format as base)
-    hash=$(echo -n "$password" | openssl passwd -6 -salt "$salt" -stdin)
+#    # Generate bcrypt hash (using openssl's format as base)
+#    hash=$(echo -n "$password" | openssl passwd -6 -salt "$salt" -stdin)
     
-    # Convert the hash to OPNsense format
-    hash='$2b$10$'$(echo "$hash" | cut -d'$' -f4)
+#    # Convert the hash to OPNsense format
+#    hash='$2b$10$'$(echo "$hash" | cut -d'$' -f4)
     
-    echo "$hash"
-}
+#    echo "$hash"
+#}
 
 #################################################################################
 # VM Interaction Functions                                                       #
