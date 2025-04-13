@@ -509,7 +509,9 @@ done
 
 qm set "$VMID" -ide2 "local:iso/$ISO_BASENAME,media=cdrom"
 msg_info "Setting boot order"
-qm set "$VMID" -boot "order=ide2,scsi0"
+
+# Fix for the boot order syntax error
+qm set "$VMID" -boot c -bootdisk ide2
 
 CREATION_DATE=$(date +"%Y-%m-%d")
 ISO_USED="$ISO_BASENAME"
@@ -528,7 +530,8 @@ if (whiptail --backtitle "Proxmox VE PBS Install Script" --title "START VIRTUAL 
     qm stop "$VMID"
     msg_info "Removing CD drive and setting boot to VM drive"
     qm set "$VMID" -delete ide2
-    qm set "$VMID" -boot "order=scsi0"
+    # Fix for the boot order after CD removed
+    qm set "$VMID" -boot c -bootdisk scsi0
     qm start "$VMID"
     msg_ok "Removed CD drive and set boot to VM drive"
   else
