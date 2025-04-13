@@ -10,9 +10,9 @@ set -euo pipefail
 
 # Mirror and fallback settings
 MIRROR_BASE_URL="https://mirrors.ocf.berkeley.edu/opnsense/releases/"
-FALLBACK_URL="https://pkg.opnsense.org/releases/25.1/OPNsense-devel-25.1.b-dvd-amd64.iso.bz2"
-FALLBACK_RELEASE_DATE="2024-Dec-18"
-FALLBACK_VERSION="25.1.b"
+FALLBACK_URL="https://pkg.opnsense.org/releases/25.1/OPNsense-25.1-dvd-amd64.iso.bz2"
+FALLBACK_RELEASE_DATE="2025-Jan-28"
+FALLBACK_VERSION="25.1"
 
 # VM ID range
 STARTING_VM_ID=100
@@ -146,7 +146,9 @@ function error_handler() {
 
 function cleanup_vmid() {
     if [[ -n "${VMID:-}" && $(qm status "$VMID" 2>/dev/null || true) =~ running|stopped ]]; then
-        qm stop "$VMID" &>/dev/null || true
+        msg_info "Cleaning up VM $VMID"
+        qm status "$VMID" | grep -q "running" && qm stop "$VMID" &>/dev/null || true
+        sleep 2
         qm destroy "$VMID" &>/dev/null || true
     fi
 }
@@ -1075,10 +1077,10 @@ function create_vm() {
     qm set "$VMID" -ide3 "$ISO_STORAGE:iso/$ISO_BASENAME,media=cdrom"
 
     ###########################################################################
-    # 7) Boot order => Proxmox 8 uses semicolon
+    # 7) Boot order => Use fixed Proxmox 8 compatible syntax
     ###########################################################################
-    msg_info "Setting boot order => ide3;scsi0"
-    qm set "$VMID" -boot order="ide3;scsi0"
+    msg_info "Setting boot order => c"
+    qm set "$VMID" -boot c -bootdisk ide3
 
     ###########################################################################
     # 8) Description
@@ -1153,7 +1155,7 @@ function automate_install() {
         done
         # Remove CD boot device
         qm set $VMID -delete ide3
-        qm set $VMID -boot order=scsi0
+        qm set $VMID -boot c -bootdisk scsi0
         # Start the VM
         qm start $VMID
         sleep 80
@@ -1275,7 +1277,7 @@ function automate_config_import() {
         done
         # Remove CD boot device
         qm set $VMID -delete ide3
-        qm set $VMID -boot order=scsi0
+        qm set $VMID -boot c -bootdisk scsi0
         # Start the VM
         msg_info "Starting VM for configuration..."
         qm status "$VMID" | grep -q "running" || qm start "$VMID"
