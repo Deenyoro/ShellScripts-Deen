@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Purpose: Create an OPNsense configuration ISO and attach it to a Proxmox VM
-# Usage: bash opncfgiso.sh -vmid 100 -cfgxml /path/to/opnconfig.xml [-storage storage_name] [-help]
+# Usage: bash opncfgiso.sh -vmid 100 -cfgxml /path/to/opnconfig.xml [-storage storage_name] [--no-password-clean] [-help]
 
 set -euo pipefail
 
@@ -18,9 +18,11 @@ DEFAULT_STORAGE="local"
 CL="\033[m"               # Clear formatting
 GN="\033[1;92m"           # Green
 RD="\033[01;31m"          # Red
+YL="\033[01;33m"          # Yellow
 DGN="\033[32m"            # Dark Green
 BGN="\033[4;92m"          # Bold Green
 CM="${GN}✓${CL}"          # Checkmark
+WARN="${YL}!${CL}"        # Warning
 CROSS="${RD}✗${CL}"       # Cross
 
 function msg_info() {
@@ -29,6 +31,10 @@ function msg_info() {
 
 function msg_ok() {
     echo -e "${CM} ${GN}$1${CL}"
+}
+
+function msg_warn() {
+    echo -e "${WARN} ${YL}Warning:${CL} $1"
 }
 
 function msg_error() {
@@ -43,6 +49,7 @@ TEMP_DIR=""
 VMID=""
 CONFIG_XML_PATH=""
 ISO_STORAGE=""
+SKIP_PASSWORD_CLEAN="false"
 
 function error_handler() {
     local exit_code=$?
@@ -68,7 +75,8 @@ trap cleanup EXIT
 
 function check_dependencies() {
     # Define the list of required commands
-    local deps=(qm pvesh pvesm genisoimage xmlstarlet)
+    local deps=(qm pvesh pvesm genisoimage)
+    local optional_deps=(xmlstarlet)
 
     # Map each command to its corresponding Debian package
     declare -A cmd_pkg_map=(
@@ -78,6 +86,18 @@ function check_dependencies() {
         [genisoimage]=genisoimage
         [xmlstarlet]=xmlstarlet
     )
+
+    # Check for optional dependencies
+    for cmd in "${optional_deps[@]}"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            msg_warn "$cmd is not installed. Some functionality will be limited."
+            if [[ "$cmd" == "xmlstarlet" ]]; then
+                echo -e "  - Without xmlstarlet, password fields in config.xml will not be cleared (if enabled)."
+                echo -e "  - This is a security consideration as passwords might be exposed in the ISO."
+                echo
+            fi
+        fi
+    done
 
     # Array to hold missing packages
     local missing_pkgs=()
@@ -183,10 +203,12 @@ OPTIONS:
    -vmid, --vm-id            Proxmox VM ID to attach the ISO to (required)
    -cfgxml, --config-xml     Path to the OPNsense config.xml file (required)
    -storage, --storage       Proxmox storage location for the ISO (default: local)
+   --no-password-clean       Disable any password removal/cleaning in config.xml
 
 Example:
    $0 -vmid 100 -cfgxml /path/to/opnconfig.xml
    $0 -vmid 100 -cfgxml /path/to/opnconfig.xml -storage local-lvm
+   $0 -vmid 100 -cfgxml /path/to/opnconfig.xml --no-password-clean
 
 EOF
     exit 1
@@ -209,6 +231,10 @@ function parse_args() {
             -storage|--storage)
                 ISO_STORAGE="$2"
                 shift 2
+                ;;
+            --no-password-clean)
+                SKIP_PASSWORD_CLEAN="true"
+                shift
                 ;;
             *)
                 msg_error "Unknown option: $1"
@@ -259,6 +285,44 @@ function validate_inputs() {
     fi
 }
 
+function process_config_passwords() {
+    local config_file="$1"
+    
+    # Check if xmlstarlet is available
+    if command -v xmlstarlet &>/dev/null; then
+        msg_info "Using xmlstarlet to clear password fields..."
+        if ! xmlstarlet ed -L \
+            -u "//user/password" -v "" \
+            "$config_file"; then
+            msg_error "Failed to clear password fields with xmlstarlet"
+            return 1
+        fi
+        msg_ok "Password fields cleared with xmlstarlet"
+        return 0
+    fi
+    
+    # Fallback method using sed if xmlstarlet is not available
+    msg_warn "Using fallback method to clear password fields (less precise than xmlstarlet)"
+    
+    # Create a backup of the original file
+    cp "$config_file" "${config_file}.bak"
+    
+    # Use sed to try to clear password fields
+    # This is a basic approach and might not catch all password fields
+    if ! sed -i -E 's|(<password>).*?(</password>)|\1\2|g' "$config_file"; then
+        msg_error "Failed to clear password fields with fallback method"
+        # Restore from backup
+        mv "${config_file}.bak" "$config_file"
+        return 1
+    fi
+    
+    # Clean up backup
+    rm -f "${config_file}.bak"
+    
+    msg_ok "Password fields cleared with fallback method"
+    return 0
+}
+
 function create_and_attach_iso() {
     local CONFIG_LABEL="CONFIG"
     local iso_name="opnconfig-${VMID}.iso"
@@ -276,20 +340,24 @@ function create_and_attach_iso() {
         exit 1
     fi
 
-    # Blank out all user passwords for security
-    msg_info "Processing user passwords in configuration..."
-
-    # Blank all password fields (if xmlstarlet is available)
-    if command -v xmlstarlet &>/dev/null; then
-        if ! xmlstarlet ed -L \
-            -u "//user/password" -v "" \
-            "${TEMP_DIR}/conf/config.xml"; then
-            msg_error "Failed to blank user passwords in configuration"
-            exit 1
-        fi
-        msg_ok "Password fields blanked for security."
+    # Process passwords in the config file (unless --no-password-clean is set)
+    if [[ "$SKIP_PASSWORD_CLEAN" == "true" ]]; then
+        msg_warn "Skipping password cleanup due to --no-password-clean flag."
     else
-        msg_info "xmlstarlet not found - skipping password blanking"
+        msg_info "Processing user passwords in configuration..."
+        if ! process_config_passwords "${TEMP_DIR}/conf/config.xml"; then
+            msg_warn "Could not process passwords completely - continuing with potentially sensitive data"
+            echo -e "  - The configuration file may contain password hashes."
+            echo -e "  - Consider this a security risk."
+            
+            # Ask user if they want to continue
+            read -p "Continue anyway? (y/n): " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                msg_info "Aborting operation as requested."
+                exit 1
+            fi
+        fi
     fi
 
     # Verify the file was copied correctly
