@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Purpose: Automate the creation of an OPNsense VM in Proxmox VE
-# Dependencies: wget, curl, whiptail, bunzip2, genisoimage, xmlstarlet, Proxmox CLI tools (qm, pvesm, pvesh)
+# Dependencies: wget, curl, whiptail, bunzip2, genisoimage, Proxmox CLI tools (qm, pvesm, pvesh)
 
 set -euo pipefail
 
@@ -19,9 +19,13 @@ STARTING_VM_ID=100
 NEXTID=$STARTING_VM_ID
 
 # Default interface names
-DEFAULT_WAN_BRIDGE="opnwan"
-DEFAULT_LAN_BRIDGE="opnlan"
-DEFAULT_MGMT_BRIDGE="opnmgmt"
+DEFAULT_WAN_BRIDGE="vmbr0"
+DEFAULT_LAN_BRIDGE="vmbr1"
+DEFAULT_MGMT_BRIDGE="vmbr2"
+
+# Version and installation method
+INSTALLATION_METHOD="iso"  # iso or freebsd
+FREEBSD_URL="https://download.freebsd.org/releases/VM-IMAGES/14.2-RELEASE/amd64/Latest/FreeBSD-14.2-RELEASE-amd64.qcow2.xz"
 
 #################################################################################
 # ASCII Art and Visual Elements                                                  #
@@ -49,21 +53,31 @@ EOF
 CL="\033[m"               # Clear formatting
 GN="\033[1;92m"           # Green
 RD="\033[01;31m"          # Red
+YL="\033[01;33m"          # Yellow
 DGN="\033[32m"            # Dark Green
 BGN="\033[4;92m"          # Bold Green
+BL="\033[36m"             # Blue
+HA="\033[1;34m"           # Highlight
 CM="${GN}✓${CL}"          # Checkmark
 CROSS="${RD}✗${CL}"       # Cross
+WARN="${YL}!${CL}"        # Warning
+BFR="\\r\\033[K"          # Line clear
+HOLD="-"                  # Progress indicator
 
 function msg_info() {
-    echo -e "${GN}Info:${CL} $1"
+    echo -ne " ${HOLD} ${YL}${1}...${CL}"
 }
 
 function msg_ok() {
-    echo -e "${CM} ${GN}$1${CL}"
+    echo -e "${BFR} ${CM} ${GN}$1${CL}"
+}
+
+function msg_warn() {
+    echo -e "${BFR} ${WARN} ${YL}Warning:${CL} $1"
 }
 
 function msg_error() {
-    echo -e "${CROSS} ${RD}$1${CL}"
+    echo -e "${BFR} ${CROSS} ${RD}$1${CL}"
 }
 
 #################################################################################
@@ -72,6 +86,7 @@ function msg_error() {
 
 function send_line_to_vm() {
     local line="$1"
+    echo -e "${DGN}Sending to VM: ${BL}$1${CL}"
     for ((i = 0; i < ${#line}; i++)); do
         character=${line:i:1}
         case $character in
@@ -111,11 +126,13 @@ function send_line_to_vm() {
             ")") character="shift-0" ;;
         esac
         qm sendkey $VMID "$character"
+        sleep 0.01
     done
 }
 
 function press_enter() {
     qm sendkey $VMID ret
+    sleep 0.5
 }
 
 #################################################################################
@@ -168,7 +185,8 @@ trap cleanup EXIT
 
 function check_dependencies() {
     # Define the list of required commands
-    local deps=(whiptail pvesh pvesm qm wget curl bunzip2 genisoimage xmlstarlet)
+    local deps=(whiptail pvesh pvesm qm wget curl bunzip2 genisoimage)
+    local optional_deps=(xmlstarlet)
 
     # Map each command to its corresponding Debian package
     declare -A cmd_pkg_map=(
@@ -178,10 +196,22 @@ function check_dependencies() {
         [qm]=qemu-utils
         [wget]=wget
         [curl]=curl
-        [bunzip2]=bunzip2
+        [bunzip2]=bzip2
         [genisoimage]=genisoimage
         [xmlstarlet]=xmlstarlet
     )
+
+    # Check for optional dependencies
+    for cmd in "${optional_deps[@]}"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            msg_warn "$cmd is not installed. Some functionality will be limited."
+            if [[ "$cmd" == "xmlstarlet" ]]; then
+                echo -e "  - Without xmlstarlet, a fallback method will be used for XML processing."
+                echo -e "  - For best results, consider installing xmlstarlet: apt-get install xmlstarlet"
+                echo
+            fi
+        fi
+    done
 
     # Array to hold missing packages
     local missing_pkgs=()
@@ -200,7 +230,7 @@ function check_dependencies() {
 
     # If no dependencies are missing, exit the function
     if [ ${#missing_pkgs[@]} -eq 0 ]; then
-        msg_info "All required dependencies are already installed."
+        msg_ok "All required dependencies are already installed."
         return 0
     fi
 
@@ -215,7 +245,7 @@ function check_dependencies() {
                 y|Y )
                     # Run 'apt-get update' once before the first installation
                     if [ "$updated" = false ]; then
-                        msg_info "Updating package lists..."
+                        msg_info "Updating package lists"
                         if ! apt-get update; then
                             msg_error "Failed to update package lists. Please check your network connection."
                             exit 1
@@ -224,9 +254,9 @@ function check_dependencies() {
                     fi
 
                     # Install the package
-                    msg_info "Installing package '$pkg'..."
+                    msg_info "Installing package '$pkg'"
                     if apt-get install -y "$pkg"; then
-                        msg_info "Package '$pkg' installed successfully."
+                        msg_ok "Package '$pkg' installed successfully."
                     else
                         msg_error "Failed to install package '$pkg'. Please install it manually."
                         exit 1
@@ -244,7 +274,7 @@ function check_dependencies() {
         done
     done
 
-    msg_info "All missing dependencies have been handled."
+    msg_ok "All missing dependencies have been handled."
 }
 
 function check_vmid {
@@ -254,7 +284,7 @@ function check_vmid {
             ((NEXTID++))
             continue
         fi
-        if pct list | awk '{print $1}' | grep -qw "$NEXTID"; then
+        if pct list 2>/dev/null | awk '{print $1}' | grep -qw "$NEXTID"; then
             ((NEXTID++))
             continue
         fi
@@ -278,9 +308,9 @@ function check_root() {
 }
 
 function pve_check() {
-    if ! pveversion | grep -Eq "pve-manager/8.[1-9]"; then
+    if ! pveversion | grep -Eq "pve-manager/[8-9]\.[0-9]"; then
         msg_error "This version of Proxmox Virtual Environment is not supported"
-        echo -e "Requires Proxmox Virtual Environment Version 8.1 or later."
+        echo -e "Requires Proxmox Virtual Environment Version 8.0 or later."
         echo -e "Exiting..."
         sleep 2
         exit 1
@@ -305,6 +335,35 @@ function ssh_check() {
             clear
             exit 1
         fi
+    fi
+}
+
+function verify_bridge_exists() {
+    local bridge="$1"
+    local purpose="$2"
+    
+    if ! grep -q "^iface ${bridge}" /etc/network/interfaces; then
+        msg_warn "Bridge '${bridge}' for ${purpose} does not exist in /etc/network/interfaces"
+        local create_bridge=""
+        read -rp "Would you like to create this bridge? (y/n): " create_bridge
+        case "$create_bridge" in
+            y|Y)
+                # Simple bridge creation - can be enhanced
+                echo -e "\nauto $bridge\niface $bridge inet manual\n\tbridge-ports none\n\tbridge-stp off\n\tbridge-fd 0" >> /etc/network/interfaces
+                msg_ok "Bridge '$bridge' has been added to /etc/network/interfaces"
+                echo "Note: You may need to restart networking or reboot for changes to take effect."
+                ;;
+            *)
+                msg_error "Bridge '$bridge' is required but not available. Please create it manually."
+                if ! whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                    --title "BRIDGE NOT FOUND" \
+                    --yesno "Bridge '$bridge' does not exist. Continue anyway? (Not recommended)" 10 62; then
+                    exit 1
+                fi
+                ;;
+        esac
+    else
+        msg_ok "Bridge '$bridge' exists"
     fi
 }
 
@@ -411,7 +470,7 @@ function exit_script() {
 function default_settings() {
     check_vmid
     VMID="$NEXTID"
-    BIOS_TYPE="seabios"
+    BIOS_TYPE="ovmf"
     MACHINE="q35"
     DISK_CACHE=""
     HN="OPNsense$VMID"
@@ -445,13 +504,13 @@ function advanced_settings() {
         --title "VIRTUAL MACHINE ID" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
 
     HN=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --inputbox "Hostname (Default: OPNsense$VMID)" 8 60 "OPNsense${VMID}" \
+        --inputbox "Hostname (Default: OPNsense${VMID})" 8 60 "OPNsense${VMID}" \
         --title "HOSTNAME" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
 
     BIOS_TYPE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --title "FIRMWARE TYPE" --radiolist "Select firmware type:" 10 60 2 \
-        "seabios" "SeaBIOS (Legacy)" ON \
-        "ovmf" "OVMF (UEFI)" OFF \
+        "seabios" "SeaBIOS (Legacy)" OFF \
+        "ovmf" "OVMF (UEFI)" ON \
         3>&1 1>&2 2<&3 --cancel-button "Exit Script") || exit_script
 
     MACHINE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
@@ -520,6 +579,18 @@ function advanced_settings() {
             --title "MTU SIZE (MGMT)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
     fi
 
+    # Ask if user wants to select an installation method
+    if INSTALL_METHOD=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+        --title "INSTALLATION METHOD" --radiolist "Choose installation method:" 10 60 2 \
+        "iso" "ISO Installation (Traditional)" ON \
+        "freebsd" "FreeBSD base (Alternative)" OFF \
+        3>&1 1>&2 2<&3 --cancel-button "Exit Script"); then
+        INSTALLATION_METHOD="$INSTALL_METHOD"
+        echo -e "${DGN}Using Installation Method: ${BGN}$INSTALLATION_METHOD${CL}"
+    else
+        exit_script
+    fi
+
     if (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --title "START VIRTUAL MACHINE" \
         --yesno "Start VM when completed?" 10 60 --yes-button "Yes" \
@@ -527,6 +598,28 @@ function advanced_settings() {
         START_VM="yes"
     else
         START_VM="no"
+    fi
+    
+    echo -e "${DGN}Virtual Machine ID: ${BGN}${VMID}${CL}"
+    echo -e "${DGN}Using Machine Type: ${BGN}${MACHINE}${CL}"
+    echo -e "${DGN}Using Hostname: ${BGN}${HN}${CL}"
+    echo -e "${DGN}Using CPU Model: ${BGN}${CPU_TYPE}${CL}"
+    echo -e "${DGN}Allocated Cores: ${BGN}${CORE_COUNT}${CL}"
+    echo -e "${DGN}Allocated RAM: ${BGN}${RAM_SIZE}${CL}"
+    echo -e "${DGN}Using Installation Method: ${BGN}${INSTALLATION_METHOD}${CL}"
+    echo -e "${DGN}Start VM when completed: ${BGN}${START_VM}${CL}"
+}
+
+function select_installation_method() {
+    if INSTALL_METHOD=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+        --title "INSTALLATION METHOD" --radiolist "Choose installation method:" 10 60 2 \
+        "iso" "ISO Installation (Traditional)" ON \
+        "freebsd" "FreeBSD base (Alternative)" OFF \
+        3>&1 1>&2 2<&3 --cancel-button "Exit Script"); then
+        INSTALLATION_METHOD="$INSTALL_METHOD"
+        echo -e "${DGN}Using Installation Method: ${BGN}$INSTALLATION_METHOD${CL}"
+    else
+        exit_script
     fi
 }
 
@@ -541,12 +634,25 @@ function start_script() {
 }
 
 function prompt_root_password() {
+    # First password entry
     ROOT_PASSWORD=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --title "ROOT PASSWORD" --passwordbox "Enter root password:" 10 60 \
         --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+    
     if [ -z "$ROOT_PASSWORD" ]; then
         msg_error "No password entered. Exiting..."
         exit 1
+    fi
+    
+    # Confirm password
+    CONFIRM_PASSWORD=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+        --title "CONFIRM ROOT PASSWORD" --passwordbox "Confirm root password:" 10 60 \
+        --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+    
+    # Check if passwords match
+    if [ "$ROOT_PASSWORD" != "$CONFIRM_PASSWORD" ]; then
+        msg_error "Passwords do not match. Please try again."
+        prompt_root_password
     fi
 }
 
@@ -645,7 +751,17 @@ function parse_available_versions() {
 }
 
 function select_iso() {
-    parse_available_versions
+    if [ "$INSTALLATION_METHOD" != "iso" ]; then
+        return
+    fi
+    
+    # Try to parse available versions, only if we have internet connectivity
+    if ping -c 1 mirrors.ocf.berkeley.edu &>/dev/null; then
+        parse_available_versions
+    else
+        msg_warn "No internet connectivity detected. Skipping version check from mirror."
+        ISO_ENTRIES=()
+    fi
 
     MENU_ITEMS=()
     # Always add fallback first
@@ -749,7 +865,6 @@ function handle_iso_download() {
             msg_ok "Using existing ISO: $final_iso_name"
             ISO_BASENAME="$final_iso_name"
             return
-
         fi
     fi
 
@@ -795,12 +910,24 @@ function handle_iso_download() {
 
 function select_local_iso() {
     ISO_LIST=()
-    while IFS= read -r iso_file; do
-        ISO_LIST+=("$(basename "$iso_file")" "Local ISO file")
-    done < <(find /var/lib/vz/template/iso -type f -name "*.iso")
+    
+    # Check both in official templates dir and user-provided ISOs
+    local iso_dirs=("/var/lib/vz/template/iso" "$(pvesm path "$ISO_STORAGE")/template/iso")
+    
+    for iso_dir in "${iso_dirs[@]}"; do
+        if [ -d "$iso_dir" ]; then
+            while IFS= read -r iso_file; do
+                if [[ "$iso_file" == *OPNsense* && "$iso_file" == *.iso ]]; then
+                    ISO_LIST+=("$(basename "$iso_file")" "OPNsense ISO")
+                elif [[ "$iso_file" == *.iso ]]; then
+                    ISO_LIST+=("$(basename "$iso_file")" "Other ISO file")
+                fi
+            done < <(find "$iso_dir" -type f -name "*.iso" 2>/dev/null)
+        fi
+    done
 
     if [ ${#ISO_LIST[@]} -eq 0 ]; then
-        msg_error "No .iso files found in /var/lib/vz/template/iso."
+        msg_error "No .iso files found in ISO storage locations."
         exit 1
     fi
 
@@ -814,8 +941,50 @@ function select_local_iso() {
         exit 1
     fi
 
-    ISO_PATH="/var/lib/vz/template/iso/$ISO_BASENAME"
     msg_ok "Using local ISO: $ISO_BASENAME"
+}
+
+function handle_freebsd_download() {
+    if [ "$INSTALLATION_METHOD" != "freebsd" ]; then
+        return
+    fi
+
+    # Check if we have internet connectivity
+    if ! ping -c 1 download.freebsd.org &>/dev/null; then
+        msg_error "No internet connectivity. Cannot download FreeBSD image."
+        if (whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "NO INTERNET" \
+            --yesno "No internet connectivity detected. Switch to ISO installation method?" 10 60); then
+            INSTALLATION_METHOD="iso"
+            select_iso
+            return
+        else
+            exit 1
+        fi
+    fi
+
+    local freebsd_file="FreeBSD-14.2-RELEASE-amd64.qcow2"
+    local temp_dir=$(mktemp -d)
+    
+    msg_info "Downloading FreeBSD image for OPNsense installation"
+    if ! wget -q --show-progress "$FREEBSD_URL" -O "$temp_dir/freebsd.qcow2.xz"; then
+        msg_error "Failed to download FreeBSD image"
+        rm -rf "$temp_dir"
+        exit 1
+    fi
+    
+    msg_ok "Downloaded FreeBSD image"
+    msg_info "Extracting FreeBSD image..."
+    
+    if ! unxz -c "$temp_dir/freebsd.qcow2.xz" > "$temp_dir/$freebsd_file"; then
+        msg_error "Failed to extract FreeBSD image"
+        rm -rf "$temp_dir"
+        exit 1
+    fi
+    
+    # Store reference to the extracted file
+    FREEBSD_QCOW2="$temp_dir/$freebsd_file"
+    
+    msg_ok "Extracted FreeBSD image: $freebsd_file"
 }
 
 #################################################################################
@@ -823,40 +992,80 @@ function select_local_iso() {
 #################################################################################
 
 function prompt_network_configuration() {
+    local ip_regex='^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$'
+    
     LAN_IPV4=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --inputbox "Enter LAN IPv4 Address:" 8 60 --title "LAN IPv4 ADDRESS" \
+        --inputbox "Enter LAN IPv4 Address (leave empty for DHCP):" 8 60 --title "LAN IPv4 ADDRESS" \
         --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
-    if [ -z "$LAN_IPV4" ]; then
-        msg_error "No LAN IPv4 Address entered. Exiting..."
-        exit 1
-    fi
-
-    SUBNET_MASK=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --inputbox "Enter Subnet Mask (CIDR format, e.g., 24):" 8 60 \
-        --title "SUBNET MASK" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
-    if [ -z "$SUBNET_MASK" ]; then
-        msg_error "No Subnet Mask entered. Exiting..."
-        exit 1
+    
+    if [ -n "$LAN_IPV4" ]; then
+        if [[ ! "$LAN_IPV4" =~ $ip_regex ]]; then
+            msg_error "Invalid IP address format. Should be like 192.168.1.1"
+            prompt_network_configuration
+            return
+        fi
+        
+        SUBNET_MASK=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+            --inputbox "Enter Subnet Mask (CIDR format, e.g., 24):" 8 60 \
+            --title "SUBNET MASK" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
+        
+        if [ -z "$SUBNET_MASK" ]; then
+            msg_error "No Subnet Mask entered. Exiting..."
+            exit 1
+        fi
+        
+        # Validate subnet mask is a number between 1-32
+        if ! [[ "$SUBNET_MASK" =~ ^[0-9]+$ ]] || [ "$SUBNET_MASK" -lt 1 ] || [ "$SUBNET_MASK" -gt 32 ]; then
+            msg_error "Invalid subnet mask. Must be a number between 1 and 32."
+            prompt_network_configuration
+            return
+        fi
+    else
+        msg_ok "Using DHCP for LAN interface"
     fi
 
     if (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --title "DHCP SERVER" --yesno "Enable DHCP Server?" \
         10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
         ENABLE_DHCP="yes"
-        DHCP_START=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Start of DHCP range:" 8 60 \
-            --title "DHCP RANGE START" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
-        if [ -z "$DHCP_START" ]; then
-            msg_error "No DHCP Start Range entered. Exiting..."
-            exit 1
-        fi
+        
+        # Only prompt for DHCP range if a static IP was set
+        if [ -n "$LAN_IPV4" ]; then
+            # Calculate network range based on IP and subnet mask
+            IFS='.' read -r i1 i2 i3 i4 <<< "$LAN_IPV4"
+            local ip_decimal=$(( (i1<<24) + (i2<<16) + (i3<<8) + i4 ))
+            local cidr=$SUBNET_MASK
+            local netmask_decimal=$(( 0xffffffff - ((1 << (32-cidr)) - 1) ))
+            local network_decimal=$(( ip_decimal & netmask_decimal ))
+            local network_i1=$(( (network_decimal>>24) & 0xff ))
+            local network_i2=$(( (network_decimal>>16) & 0xff ))
+            local network_i3=$(( (network_decimal>>8) & 0xff ))
+            local network_i4=$(( network_decimal & 0xff ))
+            
+            # Suggested range: x.x.x.100 - x.x.x.200
+            local suggested_start="${network_i1}.${network_i2}.${network_i3}.100"
+            local suggested_end="${network_i1}.${network_i2}.${network_i3}.200"
+            
+            DHCP_START=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                --inputbox "Start of DHCP range:" 8 60 "$suggested_start" \
+                --title "DHCP RANGE START" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
+            
+            if [ -z "$DHCP_START" ] || [[ ! "$DHCP_START" =~ $ip_regex ]]; then
+                msg_error "Invalid DHCP Start Range. Using default: $suggested_start"
+                DHCP_START="$suggested_start"
+            fi
 
-        DHCP_END=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "End of DHCP range:" 8 60 \
-            --title "DHCP RANGE END" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
-        if [ -z "$DHCP_END" ]; then
-            msg_error "No DHCP End Range entered. Exiting..."
-            exit 1
+            DHCP_END=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                --inputbox "End of DHCP range:" 8 60 "$suggested_end" \
+                --title "DHCP RANGE END" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
+            
+            if [ -z "$DHCP_END" ] || [[ ! "$DHCP_END" =~ $ip_regex ]]; then
+                msg_error "Invalid DHCP End Range. Using default: $suggested_end"
+                DHCP_END="$suggested_end"
+            fi
+        else
+            msg_warn "Static IP needed for DHCP server configuration. DHCP server will not be configured."
+            ENABLE_DHCP="no"
         fi
     else
         ENABLE_DHCP="no"
@@ -894,7 +1103,7 @@ function volume_exists() {
 #   7) Final housekeeping (description).
 ###############################################################################
 function create_vm() {
-    msg_info "Starting creation of an OPNsense VM..."
+    msg_info "Starting creation of an OPNsense VM"
 
     # 1) Basic definitions
     local CREATION_DATE
@@ -912,7 +1121,6 @@ function create_vm() {
 
     msg_info "Debug: VM_STORAGE='$VM_STORAGE' (type=$STORAGE_TYPE), ISO_STORAGE='$ISO_STORAGE'"
     msg_info "Debug: VMID='$VMID', EFI_DISK_SIZE='$EFI_DISK_SIZE', DISK_SIZE='$DISK_SIZE'"
-    pvesm status || true  # optional listing of storages for debug
 
     # 2) Create the VM shell
     msg_info "Creating VM shell => ID=$VMID, Hostname=$HN"
@@ -939,16 +1147,17 @@ function create_vm() {
 
     # 3) Optionally add NICs if MANAGE_INTERFACES="yes"
     if [ "$MANAGE_INTERFACES" = "yes" ]; then
-        msg_info "Adding up to 3 VirtIO NICs (WAN, LAN, MGMT) ..."
+        msg_info "Adding up to 3 VirtIO NICs (WAN, LAN, MGMT)"
         qm set "$VMID" -net0 "virtio,bridge=$BRIDGE1,macaddr=$MAC1,mtu=$MTU1"
         qm set "$VMID" -net1 "virtio,bridge=$BRIDGE2,macaddr=$MAC2,mtu=$MTU2"
         qm set "$VMID" -net2 "virtio,bridge=$BRIDGE3,macaddr=$MAC3,mtu=$MTU3"
+        msg_ok "Network interfaces added successfully"
     fi
 
     ###########################################################################
     # 4) EFI Disk
     ###########################################################################
-    msg_info "Creating EFI disk..."
+    msg_info "Creating EFI disk"
     local efi_index=0
 
     while true; do
@@ -957,16 +1166,16 @@ function create_vm() {
 
         msg_info "Debug: Checking EFI disk => $efi_storage_volume"
         if volume_exists "$efi_storage_volume"; then
-    if whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --title "Create VM Disks" \
-        --yesno "Would you like to create the EFI disk?\n\nWarning: If a disk already exists with name '$efi_filename', it will be deleted." \
-        12 70 --yes-button "Create" --no-button "Exit Script"; then
-        
-        msg_info "Creating => $efi_storage_volume"
-        if ! pvesm free "$efi_storage_volume"; then
-            msg_error "Could not remove existing EFI volume => $efi_storage_volume"
-            exit 1
-        fi
+            if whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                --title "Create VM Disks" \
+                --yesno "Would you like to create the EFI disk?\n\nWarning: If a disk already exists with name '$efi_filename', it will be deleted." \
+                12 70 --yes-button "Create" --no-button "Exit Script"; then
+                
+                msg_info "Creating => $efi_storage_volume"
+                if ! pvesm free "$efi_storage_volume"; then
+                    msg_error "Could not remove existing EFI volume => $efi_storage_volume"
+                    exit 1
+                fi
 
                 msg_info "Allocating EFI => $efi_filename (size=$EFI_DISK_SIZE)"
                 pvesm alloc "$VM_STORAGE" "$VMID" "$efi_filename" "$EFI_DISK_SIZE" --format raw
@@ -993,7 +1202,7 @@ function create_vm() {
     ###########################################################################
     # 5) Main Disk
     ###########################################################################
-    msg_info "Attaching main disk..."
+    msg_info "Attaching main disk"
     local main_index=$((efi_index + 1))
 
     while true; do
@@ -1002,16 +1211,16 @@ function create_vm() {
 
         msg_info "Debug: Checking main disk => $main_storage_volume"
         if volume_exists "$main_storage_volume"; then
-    if whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --title "Create VM Disks" \
-        --yesno "Would you like to create the main disk?\n\nWarning: If a disk already exists with name '$main_filename', it will be deleted." \
-        12 70 --yes-button "Create" --no-button "Exit Script"; then
-        
-        msg_info "Creating => $main_storage_volume"
-        if ! pvesm free "$main_storage_volume"; then
-            msg_error "Could not remove existing main volume => $main_storage_volume"
-            exit 1
-        fi
+            if whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                --title "Create VM Disks" \
+                --yesno "Would you like to create the main disk?\n\nWarning: If a disk already exists with name '$main_filename', it will be deleted." \
+                12 70 --yes-button "Create" --no-button "Exit Script"; then
+                
+                msg_info "Creating => $main_storage_volume"
+                if ! pvesm free "$main_storage_volume"; then
+                    msg_error "Could not remove existing main volume => $main_storage_volume"
+                    exit 1
+                fi
 
                 msg_info "Allocating main disk => $main_filename (size=$DISK_SIZE)"
                 pvesm alloc "$VM_STORAGE" "$VMID" "$main_filename" "$DISK_SIZE" --format raw
@@ -1071,22 +1280,58 @@ function create_vm() {
     done
 
     ###########################################################################
-    # 6) Attach the OPNsense ISO
+    # 6) Attach the installation media (ISO or FreeBSD qcow2)
     ###########################################################################
-    msg_info "Attaching ISO => $ISO_STORAGE:iso/$ISO_BASENAME"
-    qm set "$VMID" -ide3 "$ISO_STORAGE:iso/$ISO_BASENAME,media=cdrom"
+    if [ "$INSTALLATION_METHOD" = "iso" ]; then
+        # Using ISO installation method
+        msg_info "Attaching ISO => $ISO_STORAGE:iso/$ISO_BASENAME"
+        qm set "$VMID" -ide3 "$ISO_STORAGE:iso/$ISO_BASENAME,media=cdrom"
+        qm set "$VMID" -boot c -bootdisk ide3
+        msg_ok "ISO attached and set as boot device"
+    else
+        # Using FreeBSD qcow2 installation method
+        if [ -n "$FREEBSD_QCOW2" ] && [ -f "$FREEBSD_QCOW2" ]; then
+            msg_info "Importing FreeBSD qcow2 image"
+            
+            # Import the disk
+            if ! qm importdisk "$VMID" "$FREEBSD_QCOW2" "$VM_STORAGE" --format qcow2; then
+                msg_error "Failed to import FreeBSD qcow2 image"
+                exit 1
+            fi
+            
+            # Find the imported disk
+            local imported_disk=$(qm config "$VMID" | grep -o 'unused[0-9]\+: .*' | head -n 1 | awk '{print $1}' | tr -d ':')
+            
+            if [ -n "$imported_disk" ]; then
+                msg_info "Attaching imported disk as scsi1"
+                qm set "$VMID" -"$imported_disk" "scsi1"
+                qm set "$VMID" -boot c -bootdisk scsi1
+                msg_ok "FreeBSD image attached and set as boot device"
+            else
+                msg_error "Could not find imported disk. Manual configuration required."
+            fi
+        else
+            msg_error "FreeBSD qcow2 file not found or not downloaded correctly"
+            exit 1
+        fi
+    fi
 
     ###########################################################################
-    # 7) Boot order => Use fixed Proxmox 8 compatible syntax
+    # 7) Description and final setup
     ###########################################################################
-    msg_info "Setting boot order => c"
-    qm set "$VMID" -boot c -bootdisk ide3
-
-    ###########################################################################
-    # 8) Description
-    ###########################################################################
-    qm set "$VMID" -description "# OPNsense VM (ID=$VMID) - Created $CREATION_DATE - ISO Used: $ISO_BASENAME"
-
+    local description_text="# OPNsense VM (ID=$VMID)
+Created $CREATION_DATE
+Installation Method: $INSTALLATION_METHOD
+"
+    
+    if [ "$INSTALLATION_METHOD" = "iso" ]; then
+        description_text+="ISO Used: $ISO_BASENAME"
+    else
+        description_text+="Based on FreeBSD qcow2 image"
+    fi
+    
+    qm set "$VMID" -description "$description_text"
+    
     msg_ok "Created an OPNsense VM (ID=$VMID) successfully!"
 }
 
@@ -1107,7 +1352,7 @@ function automate_install() {
         echo "ENABLE_HTTPS: $ENABLE_HTTPS"
         # Wait for initial boot
         sleep 150
-        msg_info "VM booted, sending installer command."
+        msg_info "VM booted, sending installer command"
         # Start the installer
         send_line_to_vm "installer"
         press_enter
@@ -1167,49 +1412,71 @@ function automate_install() {
         sleep 2
         press_enter
         sleep 2
+        
         # Configure network interfaces
-        send_line_to_vm "2"
+        send_line_to_vm "2"  # Select option 2 (Set interface IP address)
         press_enter
         sleep 3
-        send_line_to_vm "n"
-        press_enter
-        sleep 3
-        send_line_to_vm "$LAN_IPV4"
-        press_enter
-        sleep 3
-        send_line_to_vm "$SUBNET_MASK"
-        sleep 3
-        press_enter
-        press_enter  # Skip upstream IP
-        sleep 3
-        send_line_to_vm "n"  # Configure IPv6
-        sleep 3
-        press_enter
-        sleep 3
-        press_enter  # Set IPv6
-        sleep 6
+        
+        if [ -n "$LAN_IPV4" ]; then
+            send_line_to_vm "n"  # No DHCP
+            press_enter
+            sleep 3
+            send_line_to_vm "$LAN_IPV4"  # Static IP
+            press_enter
+            sleep 3
+            send_line_to_vm "$SUBNET_MASK"  # Subnet mask
+            sleep 3
+            press_enter
+            press_enter  # Skip upstream IP
+            sleep 3
+            send_line_to_vm "n"  # No IPv6
+            sleep 3
+            press_enter
+            sleep 3
+            press_enter  # Set IPv6
+            sleep 6
 
-        if [ "$ENABLE_DHCP" = "yes" ]; then
-            send_line_to_vm "y"
-            sleep 3
-            press_enter
-            send_line_to_vm "$DHCP_START"
-            press_enter
-            sleep 3
-            send_line_to_vm "$DHCP_END"
-            press_enter
-            sleep 3
+            if [ "$ENABLE_DHCP" = "yes" ]; then
+                send_line_to_vm "y"  # Enable DHCP
+                sleep 3
+                press_enter
+                send_line_to_vm "$DHCP_START"  # DHCP start
+                press_enter
+                sleep 3
+                send_line_to_vm "$DHCP_END"  # DHCP end
+                press_enter
+                sleep 3
+            else
+                send_line_to_vm "n"  # No DHCP
+                sleep 3
+                press_enter
+                sleep 3
+            fi
         else
-            send_line_to_vm "n"
+            # Using DHCP for LAN
+            send_line_to_vm "y"  # Yes DHCP
+            press_enter
+            sleep 3
+            send_line_to_vm "n"  # No IPv6
+            sleep 3
+            press_enter
+            sleep 3
+            press_enter  # Set IPv6
+            sleep 6
+            
+            # DHCP server not possible with DHCP client
+            send_line_to_vm "n"  # No DHCP server
             sleep 3
             press_enter
             sleep 3
         fi
 
-        if [ "$ENABLE_HTTPS" = "y" ]; then
-            send_line_to_vm "n"
+        # HTTPS setting
+        if [ "$ENABLE_HTTPS" = "n" ]; then
+            send_line_to_vm "y"  # Disable HTTPS redirect
         else
-            send_line_to_vm "y"
+            send_line_to_vm "n"  # Keep HTTPS enabled
             sleep 2
             press_enter
         fi
@@ -1221,12 +1488,363 @@ function automate_install() {
     automate_setup "$LAN_IPV4" "$SUBNET_MASK" "$ENABLE_DHCP" "$DHCP_START" "$DHCP_END" "$ENABLE_HTTPS"
 }
 
+function automate_freebsd_install() {
+    msg_info "Starting OPNsense installation from FreeBSD base"
+    
+    # Start VM if not running
+    if ! qm status "$VMID" | grep -q "running"; then
+        qm start "$VMID"
+    fi
+    
+    # Wait for boot
+    sleep 90
+    
+    # Login as root (no password on fresh FreeBSD)
+    send_line_to_vm "root"
+    press_enter
+    sleep 2
+    
+    # Download the OPNsense bootstrap script
+    send_line_to_vm "fetch https://raw.githubusercontent.com/opnsense/update/master/src/bootstrap/opnsense-bootstrap.sh.in"
+    press_enter
+    sleep 10
+    
+    # Run the bootstrap script with recent version
+    send_line_to_vm "sh ./opnsense-bootstrap.sh.in -y -f -r 25.1"
+    press_enter
+    
+    # This takes a long time - inform the user
+    msg_ok "OPNsense bootstrap started. This will take 15-20 minutes to complete."
+    echo "Please be patient. The system will automatically configure OPNsense."
+    echo "Do not interrupt this process!"
+    
+    # Wait for installation to complete (adjust time based on system speed)
+    sleep 900  # 15 minutes
+    
+    # Stop VM after installation
+    msg_info "Installation should be complete. Stopping VM to finalize configuration"
+    qm stop "$VMID"
+    
+    # Wait for VM to stop
+    until qm status "$VMID" | grep -q "stopped"; do
+        sleep 2
+    done
+    
+    msg_ok "OPNsense installation from FreeBSD base complete"
+    msg_info "Starting VM for final configuration"
+    
+    # Start VM again
+    qm start "$VMID"
+    sleep 90
+    
+    # Login with default credentials
+    send_line_to_vm "root"
+    press_enter
+    sleep 2
+    send_line_to_vm "opnsense"
+    press_enter
+    sleep 2
+    
+    # Set the root password
+    send_line_to_vm "8"  # Shell option
+    press_enter
+    sleep 2
+    send_line_to_vm "passwd"
+    press_enter
+    sleep 2
+    send_line_to_vm "$ROOT_PASSWORD"
+    press_enter
+    sleep 2
+    send_line_to_vm "$ROOT_PASSWORD"
+    press_enter
+    sleep 2
+    send_line_to_vm "exit"
+    press_enter
+    sleep 2
+    
+    # Now configure networking if needed
+    if [ -n "$LAN_IPV4" ]; then
+        send_line_to_vm "2"  # Set interface IP address
+        press_enter
+        sleep 3
+        send_line_to_vm "n"  # No DHCP
+        press_enter
+        sleep 3
+        send_line_to_vm "$LAN_IPV4"  # Static IP
+        press_enter
+        sleep 3
+        send_line_to_vm "$SUBNET_MASK"  # Subnet mask
+        press_enter
+        sleep 3
+        press_enter  # Skip upstream gateway
+        sleep 3
+        send_line_to_vm "n"  # No IPv6
+        press_enter
+        sleep 3
+        press_enter  # Skip IPv6
+        sleep 3
+        
+        if [ "$ENABLE_DHCP" = "yes" ]; then
+            send_line_to_vm "y"  # Enable DHCP server
+            press_enter
+            sleep 3
+            send_line_to_vm "$DHCP_START"
+            press_enter
+            sleep 3
+            send_line_to_vm "$DHCP_END"
+            press_enter
+            sleep 3
+        else
+            send_line_to_vm "n"  # No DHCP server
+            press_enter
+            sleep 3
+        fi
+    fi
+    
+    # Complete setup
+    send_line_to_vm "0"  # Exit to console
+    press_enter
+    
+    msg_ok "OPNsense FreeBSD installation completed and configured"
+}
+
+function prompt_mount_config() {
+    if (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+        --title "MOUNT CONFIGURATION" \
+        --yesno "Would you like to mount an OPNsense XML configuration file to the VM?" 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
+        msg_info "Root password will be needed for the configuration"
+        prompt_root_password
+        
+        # Check if external config script exists
+        local config_script="$(dirname "$0")/opncfgiso.sh"
+        if [ -f "$config_script" ] && [ -x "$config_script" ]; then
+            msg_info "Found external configuration script: $config_script"
+            
+            # Prompt for config.xml path
+            local CONFIG_XML_PATH=""
+            while true; do
+                CONFIG_XML_PATH=$(whiptail \
+                    --backtitle "Proxmox VE OPNsense Install Script" \
+                    --inputbox "Enter the full path to your config.xml file:" \
+                    10 60 \
+                    --title "CONFIG.XML PATH" \
+                    --cancel-button "Exit Script" \
+                    3>&1 1>&2 2<&3) || exit_script
+
+                if [[ -f "$CONFIG_XML_PATH" ]]; then
+                    msg_ok "Config.xml found at '$CONFIG_XML_PATH'"
+                    break
+                else
+                    msg_error "File not found at '$CONFIG_XML_PATH'. Please try again."
+                fi
+            done
+            
+            # Use the external script
+            msg_info "Using external script to create configuration ISO"
+            if ! bash "$config_script" -vmid "$VMID" -cfgxml "$CONFIG_XML_PATH" -storage "$ISO_STORAGE"; then
+                msg_error "Failed to create configuration ISO with external script"
+                exit 1
+            fi
+            
+            msg_ok "Configuration ISO created and attached with external script"
+        else
+            # Use internal function
+            msg_info "Using built-in function to create configuration ISO"
+            interactive_mount_config
+        fi
+        
+        if (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+            --title "AUTOMATE CONFIG IMPORT" \
+            --yesno "Would you like the script to automatically import the configuration?" 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
+            msg_info "Proceeding to automate configuration import"
+            automate_config_import
+        else
+            msg_ok "You can manually import the configuration after VM starts."
+        fi
+    else
+        prompt_root_password
+        prompt_network_configuration
+        AUTOMATE_SETUP="yes"
+    fi
+}
+
+function interactive_mount_config() {
+    CONFIG_XML_PATH=""
+    VM_ID="$VMID"
+    CONFIG_STORAGE=""
+
+    # Prompt for config.xml file
+    while true; do
+        CONFIG_XML_PATH=$(whiptail \
+            --backtitle "Proxmox VE OPNsense Install Script" \
+            --inputbox "Enter the full path to your config.xml file:" \
+            10 60 \
+            --title "CONFIG.XML PATH" \
+            --cancel-button "Exit Script" \
+            3>&1 1>&2 2<&3) || exit_script
+
+        if [[ -f "$CONFIG_XML_PATH" ]]; then
+            msg_ok "Config.xml found at '$CONFIG_XML_PATH'"
+            break
+        else
+            msg_error "File not found at '$CONFIG_XML_PATH'. Please try again."
+        fi
+    done
+
+    # Ask which storage to use for the configuration ISO
+    CONFIG_STORAGE=$(select_config_storage "Configuration Storage Location" "Which storage pool should the config image be created in?")
+
+    # Create and attach the configuration ISO
+    create_and_attach_config
+}
+
+function process_config_passwords() {
+    local config_file="$1"
+    
+    # Check if xmlstarlet is available
+    if command -v xmlstarlet &>/dev/null; then
+        msg_info "Using xmlstarlet to clear password fields"
+        if ! xmlstarlet ed -L \
+            -u "//user/password" -v "" \
+            "$config_file"; then
+            msg_error "Failed to clear password fields with xmlstarlet"
+            return 1
+        fi
+        msg_ok "Password fields cleared with xmlstarlet"
+        return 0
+    fi
+    
+    # Fallback method using sed if xmlstarlet is not available
+    msg_warn "Using fallback method to clear password fields (less precise than xmlstarlet)"
+    
+    # Create a backup of the original file
+    cp "$config_file" "${config_file}.bak"
+    
+    # Use sed to try to clear password fields
+    if ! sed -i -E 's|(<password>).*?(</password>)|\1\2|g' "$config_file"; then
+        msg_error "Failed to clear password fields with fallback method"
+        # Restore from backup
+        mv "${config_file}.bak" "$config_file"
+        return 1
+    fi
+    
+    # Clean up backup
+    rm -f "${config_file}.bak"
+    
+    msg_ok "Password fields cleared with fallback method"
+    return 0
+}
+
+function create_and_attach_config() {
+    local CONFIG_LABEL="CONFIG"
+    local iso_name="opnconfig-${VMID}.iso"
+    local work_dir=$(mktemp -d)
+    
+    msg_info "Creating temporary work directory"
+    
+    # Create the directory structure
+    mkdir -p "${work_dir}/conf"
+    
+    # Copy the config file
+    msg_info "Copying config.xml to temporary location"
+    if ! cp "${CONFIG_XML_PATH}" "${work_dir}/conf/config.xml"; then
+        msg_error "Failed to copy config file"
+        rm -rf "${work_dir}"
+        exit 1
+    fi
+
+    # Process passwords
+    msg_info "Processing user passwords in configuration"
+    if ! process_config_passwords "${work_dir}/conf/config.xml"; then
+        msg_warn "Password processing completed with warnings. The configuration might contain sensitive data."
+        
+        # Ask user to continue
+        local continue_anyway=""
+        read -rp "Continue anyway? (y/n): " continue_anyway
+        if [[ ! "$continue_anyway" =~ ^[Yy]$ ]]; then
+            msg_info "Aborting at user request"
+            rm -rf "${work_dir}"
+            exit 1
+        fi
+    else
+        msg_ok "Password processing completed successfully"
+    fi
+
+    # Verify the file was copied correctly
+    if ! [ -f "${work_dir}/conf/config.xml" ]; then
+        msg_error "Config file not found in expected location after copy"
+        rm -rf "${work_dir}"
+        exit 1
+    fi
+
+    # Create the ISO
+    msg_info "Creating configuration ISO"
+    if ! genisoimage -quiet -o "${work_dir}/${iso_name}" -V "${CONFIG_LABEL}" -r -J "${work_dir}"; then
+        msg_error "Failed to create config image"
+        rm -rf "${work_dir}"
+        exit 1
+    fi
+
+    # Verify ISO was created
+    if ! [ -f "${work_dir}/${iso_name}" ]; then
+        msg_error "ISO file not found after creation"
+        rm -rf "${work_dir}"
+        exit 1
+    fi
+
+    # Move ISO to storage
+    local iso_storage_path
+    if [ "$ISO_STORAGE" = "local" ]; then
+        iso_storage_path="/var/lib/vz/template/iso"
+    else
+        iso_storage_path="$(pvesm path "$ISO_STORAGE")/template/iso"
+    fi
+    
+    msg_info "Moving ISO to storage location"
+    mkdir -p "$iso_storage_path"
+    
+    if ! mv "${work_dir}/${iso_name}" "${iso_storage_path}/${iso_name}"; then
+        msg_error "Failed to move config image to storage"
+        rm -rf "${work_dir}"
+        exit 1
+    fi
+
+    # Verify ISO exists in final location
+    if ! [ -f "${iso_storage_path}/${iso_name}" ]; then
+        msg_error "ISO file not found in final location"
+        rm -rf "${work_dir}"
+        exit 1
+    fi
+
+    # Clean up work directory
+    rm -rf "${work_dir}"
+
+    # Check if VM already has a device on ide2
+    if qm config "$VMID" | grep -q "ide2:"; then
+        msg_info "Removing existing device on ide2"
+        if ! qm set "$VMID" -delete ide2; then
+            msg_error "Failed to remove existing device on ide2"
+            exit 1
+        fi
+    fi
+
+    # Attach the ISO to the VM as ide2
+    msg_info "Attaching configuration ISO to VM"
+    if ! qm set "${VMID}" --ide2 "${ISO_STORAGE}:iso/${iso_name},media=cdrom"; then
+        msg_error "Failed to attach config image to VM"
+        rm -f "${iso_storage_path}/${iso_name}"
+        exit 1
+    fi
+
+    msg_ok "Config image created and attached as ide2"
+}
+
 function automate_config_import() {
-        msg_info "Starting VM..."
+        msg_info "Starting VM"
         qm status "$VMID" | grep -q "running" || qm start "$VMID"
         # Wait for initial boot
         sleep 150
-        msg_info "VM booted, sending installer command."
+        msg_info "VM booted, sending installer command"
         # Start the installer
         send_line_to_vm "installer"
         press_enter
@@ -1269,7 +1887,7 @@ function automate_config_import() {
         # Wait for reboot
         sleep 30
         # Stop the VM
-        msg_info "Stopping VM..."
+        msg_info "Stopping VM"
         qm status "$VMID" | grep -q "stopped" || qm stop "$VMID"
         # Wait for stop
         until qm status $VMID | grep -q "stopped"; do
@@ -1279,7 +1897,7 @@ function automate_config_import() {
         qm set $VMID -delete ide3
         qm set $VMID -boot c -bootdisk scsi0
         # Start the VM
-        msg_info "Starting VM for configuration..."
+        msg_info "Starting VM for configuration"
         qm status "$VMID" | grep -q "running" || qm start "$VMID"
         sleep 80
         # Login as root
@@ -1306,21 +1924,21 @@ function automate_config_import() {
         sleep 25
         send_line_to_vm "exit"
         press_enter
-	sleep 2
-	# Set root password again
-	send_line_to_vm "3"
- 	press_enter
-  	sleep 2
-  	send_line_to_vm "y"
-   	press_enter
-    	sleep 2
-	send_line_to_vm "$ROOT_PASSWORD"
+        sleep 2
+        # Set root password again
+        send_line_to_vm "3"
+        press_enter
+        sleep 2
+        send_line_to_vm "y"
         press_enter
         sleep 2
         send_line_to_vm "$ROOT_PASSWORD"
         press_enter
-	sleep 2
- 	# Reboot VM
+        sleep 2
+        send_line_to_vm "$ROOT_PASSWORD"
+        press_enter
+        sleep 2
+        # Reboot VM
         send_line_to_vm "6"
         press_enter
         sleep 2
@@ -1329,13 +1947,13 @@ function automate_config_import() {
         press_enter
         sleep 150
         # Force remove ISO from mount list
-        msg_info "Stopping VM for cleanup..."
+        msg_info "Stopping VM for cleanup"
         qm status "$VMID" | grep -q "stopped" || qm stop "$VMID"
         until qm status $VMID | grep -q "stopped"; do
         sleep 2
         done
         # Remove the mounted ISO and delete the ISO file
-        msg_info "Cleaning up configuration ISO..."
+        msg_info "Cleaning up configuration ISO"
         qm set $VMID -delete ide2
         # Delete the actual ISO file
         local iso_name="opnconfig-${VMID}.iso"
@@ -1346,160 +1964,113 @@ function automate_config_import() {
             iso_path="$(pvesm path "$ISO_STORAGE")/template/iso/${iso_name}"
         fi
         if [ -f "$iso_path" ]; then
-            msg_info "Removing configuration ISO file..."
+            msg_info "Removing configuration ISO file"
             rm -f "$iso_path"
             msg_ok "Configuration ISO removed"
         fi
         # Start the VM again
-        msg_info "Starting VM after configuration import..."
+        msg_info "Starting VM after configuration import"
         qm status "$VMID" | grep -q "running" || qm start "$VMID"
         sleep 40
         # Config Import completed
         msg_ok "Configuration import and cleanup completed"
 }
 
-function prompt_mount_config() {
-    if (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --title "MOUNT CONFIGURATION" \
-        --yesno "Would you like to mount an OPNsense XML configuration file to the VM?" 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
-        msg_info "Root password will be needed for the configuration."
-        prompt_root_password
-        interactive_mount_config
+function add_host_network_interfaces() {
+    if [ "$MANAGE_INTERFACES" = "yes" ]; then
         if (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --title "AUTOMATE CONFIG IMPORT" \
-            --yesno "Would you like the script to automatically import the configuration?" 10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
-            msg_info "Proceeding to automate configuration import..."
-            automate_config_import
-        else
-            msg_ok "You can manually import the configuration after VM starts."
+            --title "ADD INTERFACES" --defaultno \
+            --yesno "Would you like to add the interfaces to /etc/network/interfaces?" \
+            10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
+
+            msg_info "Listing physical interfaces"
+            PHYSICAL_INTERFACES=$(ip link show | grep -E '^[0-9]+:' | awk -F': ' '{print $2}' | grep -v lo)
+            echo "Available physical interfaces:"
+            echo "$PHYSICAL_INTERFACES"
+
+            BRIDGE_PORT_WAN=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                --inputbox "Enter bridge-ports for $BRIDGE1 (WAN)" 8 60 --title "BRIDGE-PORTS (WAN)" \
+                --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
+
+            BRIDGE_PORT_LAN=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                --inputbox "Enter bridge-ports for $BRIDGE2 (LAN)" 8 60 --title "BRIDGE-PORTS (LAN)" \
+                --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
+
+            BRIDGE_PORT_MGMT=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                --inputbox "Enter bridge-ports for $BRIDGE3 (MGMT)" 8 60 --title "BRIDGE-PORTS (MGMT)" \
+                --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
+
+            # Check if bridges already exist
+            if grep -q "^iface $BRIDGE1" /etc/network/interfaces; then
+                msg_warn "Bridge $BRIDGE1 already exists in /etc/network/interfaces"
+                if ! (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                    --title "BRIDGE EXISTS" \
+                    --yesno "Bridge $BRIDGE1 already exists. Overwrite configuration?" \
+                    10 60 --yes-button "Overwrite" --no-button "Skip"); then
+                    msg_info "Skipping $BRIDGE1 configuration"
+                else
+                    # Remove existing bridge config
+                    sed -i "/^auto $BRIDGE1/,/^$/d" /etc/network/interfaces
+                    echo -e "\nauto $BRIDGE1\niface $BRIDGE1 inet manual\n\tbridge-ports $BRIDGE_PORT_WAN\n\tbridge-stp off\n\tbridge-fd 0" >> /etc/network/interfaces
+                    msg_ok "Updated $BRIDGE1 configuration"
+                fi
+            else
+                echo -e "\nauto $BRIDGE1\niface $BRIDGE1 inet manual\n\tbridge-ports $BRIDGE_PORT_WAN\n\tbridge-stp off\n\tbridge-fd 0" >> /etc/network/interfaces
+                msg_ok "Added $BRIDGE1 configuration"
+            fi
+            
+            if grep -q "^iface $BRIDGE2" /etc/network/interfaces; then
+                msg_warn "Bridge $BRIDGE2 already exists in /etc/network/interfaces"
+                if ! (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                    --title "BRIDGE EXISTS" \
+                    --yesno "Bridge $BRIDGE2 already exists. Overwrite configuration?" \
+                    10 60 --yes-button "Overwrite" --no-button "Skip"); then
+                    msg_info "Skipping $BRIDGE2 configuration"
+                else
+                    sed -i "/^auto $BRIDGE2/,/^$/d" /etc/network/interfaces
+                    echo -e "\nauto $BRIDGE2\niface $BRIDGE2 inet manual\n\tbridge-ports $BRIDGE_PORT_LAN\n\tbridge-stp off\n\tbridge-fd 0" >> /etc/network/interfaces
+                    msg_ok "Updated $BRIDGE2 configuration"
+                fi
+            else
+                echo -e "\nauto $BRIDGE2\niface $BRIDGE2 inet manual\n\tbridge-ports $BRIDGE_PORT_LAN\n\tbridge-stp off\n\tbridge-fd 0" >> /etc/network/interfaces
+                msg_ok "Added $BRIDGE2 configuration"
+            fi
+
+            # For MGMT, we'll handle a static IP
+            MGMT_IP=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                --inputbox "Enter static IP address for $BRIDGE3 (MGMT)" 8 60 --title "MGMT IP (MGMT)" \
+                --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
+
+            MGMT_GW=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                --inputbox "Enter gateway for $BRIDGE3 (MGMT)" 8 60 --title "MGMT GATEWAY (MGMT)" \
+                --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
+
+            MGMT_SUBNET=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                --inputbox "Enter subnet mask for $BRIDGE3 (MGMT) (CIDR format, e.g., 24)" 8 60 "24" \
+                --title "MGMT SUBNET (MGMT)" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
+
+            if grep -q "^iface $BRIDGE3" /etc/network/interfaces; then
+                msg_warn "Bridge $BRIDGE3 already exists in /etc/network/interfaces"
+                if ! (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                    --title "BRIDGE EXISTS" \
+                    --yesno "Bridge $BRIDGE3 already exists. Overwrite configuration?" \
+                    10 60 --yes-button "Overwrite" --no-button "Skip"); then
+                    msg_info "Skipping $BRIDGE3 configuration"
+                else
+                    sed -i "/^auto $BRIDGE3/,/^$/d" /etc/network/interfaces
+                    echo -e "\nauto $BRIDGE3\niface $BRIDGE3 inet static\n\taddress $MGMT_IP/$MGMT_SUBNET\n\tgateway $MGMT_GW\n\tbridge-ports $BRIDGE_PORT_MGMT\n\tbridge-stp off\n\tbridge-fd 0" >> /etc/network/interfaces
+                    msg_ok "Updated $BRIDGE3 configuration"
+                fi
+            else
+                echo -e "\nauto $BRIDGE3\niface $BRIDGE3 inet static\n\taddress $MGMT_IP/$MGMT_SUBNET\n\tgateway $MGMT_GW\n\tbridge-ports $BRIDGE_PORT_MGMT\n\tbridge-stp off\n\tbridge-fd 0" >> /etc/network/interfaces
+                msg_ok "Added $BRIDGE3 configuration"
+            fi
+
+            msg_ok "Interfaces added to /etc/network/interfaces"
+            echo "Note: You may need to restart networking or reboot for changes to take effect:"
+            echo "  systemctl restart networking"
         fi
-    else
-        prompt_root_password
-        prompt_network_configuration
-        AUTOMATE_SETUP="yes"
     fi
-}
-
-function interactive_mount_config() {
-    CONFIG_XML_PATH=""
-    VM_ID="$VMID"
-    CONFIG_STORAGE=""
-
-    # Prompt for config.xml file
-    while true; do
-        CONFIG_XML_PATH=$(whiptail \
-            --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Enter the full path to your config.xml file:" \
-            10 60 \
-            --title "CONFIG.XML PATH" \
-            --cancel-button "Exit Script" \
-            3>&1 1>&2 2<&3) || exit_script
-
-        if [[ -f "$CONFIG_XML_PATH" ]]; then
-            msg_ok "Config.xml found at '$CONFIG_XML_PATH'."
-            break
-        else
-            msg_error "File not found at '$CONFIG_XML_PATH'. Please try again."
-        fi
-    done
-
-    # Ask which storage to use for the configuration ISO
-    CONFIG_STORAGE=$(select_config_storage "Configuration Storage Location" "Which storage pool should the config image be created in?")
-
-    # Create and attach the configuration ISO
-    create_and_attach_config
-}
-
-function create_and_attach_config() {
-    local CONFIG_LABEL="CONFIG"
-    local iso_name="opnconfig-${VMID}.iso"
-    local work_dir=$(mktemp -d)
-    
-    msg_info "Creating temporary work directory..."
-    
-    # Create the directory structure
-    mkdir -p "${work_dir}/conf"
-    
-    # Copy the config file
-    msg_info "Copying config.xml to temporary location..."
-    if ! cp "${CONFIG_XML_PATH}" "${work_dir}/conf/config.xml"; then
-        msg_error "Failed to copy config file"
-        rm -rf "${work_dir}"
-        exit 1
-    fi
-
-    # First blank out all user passwords
-    msg_info "Processing user passwords in configuration..."
-
-    # Blank all password fields
-    if ! xmlstarlet ed -L \
-        -u "//user/password" -v "" \
-        "${work_dir}/conf/config.xml"; then
-        msg_error "Failed to blank user passwords in configuration"
-        rm -rf "${work_dir}"
-        exit 1
-    fi
-
-    msg_info "Password processing completed successfully."
-
-    # Verify the file was copied correctly
-    if ! [ -f "${work_dir}/conf/config.xml" ]; then
-        msg_error "Config file not found in expected location after copy"
-        rm -rf "${work_dir}"
-        exit 1
-    fi
-
-    # Create the ISO
-    msg_info "Creating configuration ISO..."
-    if ! genisoimage -quiet -o "${work_dir}/${iso_name}" -V "${CONFIG_LABEL}" -r -J "${work_dir}"; then
-        msg_error "Failed to create config image"
-        rm -rf "${work_dir}"
-        exit 1
-    fi
-
-    # Verify ISO was created
-    if ! [ -f "${work_dir}/${iso_name}" ]; then
-        msg_error "ISO file not found after creation"
-        rm -rf "${work_dir}"
-        exit 1
-    fi
-
-    # Move ISO to storage
-    local iso_storage_path
-    if [ "$ISO_STORAGE" = "local" ]; then
-        iso_storage_path="/var/lib/vz/template/iso"
-    else
-        iso_storage_path="$(pvesm path "$ISO_STORAGE")/template/iso"
-    fi
-    
-    msg_info "Moving ISO to storage location..."
-    mkdir -p "$iso_storage_path"
-    
-    if ! mv "${work_dir}/${iso_name}" "${iso_storage_path}/${iso_name}"; then
-        msg_error "Failed to move config image to storage"
-        rm -rf "${work_dir}"
-        exit 1
-    fi
-
-    # Verify ISO exists in final location
-    if ! [ -f "${iso_storage_path}/${iso_name}" ]; then
-        msg_error "ISO file not found in final location"
-        rm -rf "${work_dir}"
-        exit 1
-    fi
-
-    # Clean up work directory
-    rm -rf "${work_dir}"
-
-    # Attach the ISO to the VM as ide2
-    msg_info "Attaching configuration ISO to VM..."
-    if ! qm set "${VMID}" --ide2 "${ISO_STORAGE}:iso/${iso_name},media=cdrom"; then
-        msg_error "Failed to attach config image to VM"
-        rm -f "${iso_storage_path}/${iso_name}"
-        exit 1
-    fi
-
-    msg_ok "Config image created and attached as ide2"
 }
 
 #################################################################################
@@ -1508,20 +2079,22 @@ function create_and_attach_config() {
 
 header_info
 
+# Check prerequisites
 check_root
 check_dependencies
 arch_check
 pve_check
 ssh_check
 
+# Create a temporary directory for downloads
 TEMP_DIR=$(mktemp -d)
-pushd "$TEMP_DIR" >/dev/null
+trap cleanup EXIT
 
 # Prompt user to proceed
 if ! whiptail --backtitle "Proxmox VE OPNsense Install Script" --title "OPNsense VM" \
     --yesno "This will create a New OPNsense VM. Proceed?" 10 58 \
     --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"; then
-    header_info && echo -e "User exited script.\n" && exit 1
+    header_info && echo -e "⚠ User exited script.\n" && exit 1
 fi
 
 # Prompt to manage interfaces
@@ -1534,34 +2107,67 @@ else
     MANAGE_INTERFACES="yes"
 fi
 
+# Prompt to select installation method
+if ! whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+    --title "INSTALLATION METHOD" \
+    --yesno "Use ISO installation method? (Recommended)\nNo = Use FreeBSD base installation method" \
+    10 60 --yes-button "Use ISO" --no-button "Use FreeBSD" --cancel-button "Exit Script"; then
+    INSTALLATION_METHOD="freebsd"
+    msg_ok "Using FreeBSD base installation method"
+else
+    INSTALLATION_METHOD="iso"
+    msg_ok "Using ISO installation method"
+fi
+
 # Gather user-defined settings
 start_script
 
 # Now pick separate storages for ISO vs. VM disks:
 ISO_STORAGE=$(select_iso_storage)
 VM_STORAGE=$(select_disk_storage)
-msg_ok "Selected [$ISO_STORAGE] for ISO and [$VM_STORAGE] for VM Disks."
+msg_ok "Selected [$ISO_STORAGE] for ISO and [$VM_STORAGE] for VM Disks"
 
-# Next pick the ISO (local or downloaded)
-select_iso
+# Verify bridges exist if managing interfaces
+if [ "$MANAGE_INTERFACES" = "yes" ]; then
+    verify_bridge_exists "$BRIDGE1" "WAN"
+    verify_bridge_exists "$BRIDGE2" "LAN"
+    verify_bridge_exists "$BRIDGE3" "MGMT"
+fi
+
+# Handle installation media based on method
+if [ "$INSTALLATION_METHOD" = "iso" ]; then
+    # Next pick the ISO (local or downloaded)
+    select_iso
+else
+    # Handle FreeBSD image download
+    handle_freebsd_download
+fi
 
 # Create the VM (with Overwrite/Next logic for disks)
 create_vm
 
-# Optional config mount:
-prompt_mount_config
+# Optional config mount or automated setup
+if [ "$INSTALLATION_METHOD" = "iso" ]; then
+    prompt_mount_config
+fi
 
 # Start if user asked:
 if [ "$START_VM" = "yes" ]; then
-    if [ "$AUTOMATE_SETUP" = "yes" ]; then
-        msg_info "Starting OPNsense VM"
-        qm status "$VMID" | grep -q "running" || qm start "$VMID"
-        msg_info "VM Started. Proceeding to automate the installation."
-        automate_install
+    if [ "$INSTALLATION_METHOD" = "iso" ]; then
+        if [ "$AUTOMATE_SETUP" = "yes" ]; then
+            msg_info "Starting OPNsense VM"
+            qm status "$VMID" | grep -q "running" || qm start "$VMID"
+            msg_info "VM Started. Proceeding to automate the installation."
+            automate_install
+        else
+            msg_info "Starting OPNsense VM"
+            qm status "$VMID" | grep -q "running" || qm start "$VMID"
+            msg_ok "VM started."
+        fi
     else
-        msg_info "Starting OPNsense VM"
-        qm status "$VMID" | grep -q "running" || qm start "$VMID"
-        msg_ok "VM started."
+        # FreeBSD method
+        msg_info "Starting OPNsense installation from FreeBSD base"
+        automate_freebsd_install
     fi
 else
     msg_info "VM creation complete. VM not started."
@@ -1569,62 +2175,25 @@ fi
 
 # If also bridging on host
 if [ "$MANAGE_INTERFACES" = "yes" ]; then
-    if (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --title "ADD INTERFACES" --defaultno \
-        --yesno "Would you like to add the interfaces to /etc/network/interfaces?" \
-        10 60 --yes-button "Yes" --no-button "No" --cancel-button "Exit Script"); then
-
-        msg_info "Listing physical interfaces"
-        PHYSICAL_INTERFACES=$(ip link show | grep -E '^[0-9]+:' | awk -F': ' '{print $2}')
-        echo "Available physical interfaces:"
-        echo "$PHYSICAL_INTERFACES"
-
-        BRIDGE_PORT_WAN=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Enter bridge-ports for $BRIDGE1 (WAN)" 8 60 --title "BRIDGE-PORTS (WAN)" \
-            --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
-
-        BRIDGE_PORT_LAN=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Enter bridge-ports for $BRIDGE2 (LAN)" 8 60 --title "BRIDGE-PORTS (LAN)" \
-            --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
-
-        BRIDGE_PORT_MGMT=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Enter bridge-ports for $BRIDGE3 (MGMT)" 8 60 --title "BRIDGE-PORTS (MGMT)" \
-            --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
-
-        MGMT_IP=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Enter static IP address for $BRIDGE3 (MGMT)" 8 60 --title "MGMT IP (MGMT)" \
-            --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
-
-        MGMT_GW=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "Enter gateway for $BRIDGE3 (MGMT)" 8 60 --title "MGMT GATEWAY (MGMT)" \
-            --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
-
-        echo "auto $BRIDGE1
-iface $BRIDGE1 inet manual
-        bridge-ports $BRIDGE_PORT_WAN
-        bridge-stp off
-        bridge-fd 0
-
-auto $BRIDGE2
-iface $BRIDGE2 inet manual
-        bridge-ports $BRIDGE_PORT_LAN
-        bridge-stp off
-        bridge-fd 0
-
-auto $BRIDGE3
-iface $BRIDGE3 inet static
-        address $MGMT_IP
-        gateway $MGMT_GW
-        bridge-ports $BRIDGE_PORT_MGMT
-        bridge-stp off
-        bridge-fd 0" | tee -a /etc/network/interfaces >/dev/null
-
-        msg_ok "Interfaces added to /etc/network/interfaces"
-    fi
+    add_host_network_interfaces
 fi
 
+# Display completion message with IP info if available
 msg_ok "Completed Successfully!"
 
-cleanup
-popd >/dev/null
+if [ -n "$LAN_IPV4" ]; then
+    echo -e "${BL}You can access the OPNsense WebUI at:${CL}"
+    if [ "$ENABLE_HTTPS" = "y" ]; then
+        echo -e "${GN}https://${LAN_IPV4}/ ${CL}"
+    else
+        echo -e "${GN}http://${LAN_IPV4}/ ${CL}"
+    fi
+    echo -e "Username: ${GN}root${CL}"
+    echo -e "Password: ${GN}[your configured password]${CL}"
+else
+    echo -e "The OPNsense VM has been created. You'll need to discover the IP address to access the WebUI."
+    echo -e "Default username: ${GN}root${CL}"
+    echo -e "Default password: ${GN}opnsense${CL} (if not changed during setup)"
+fi
+
 exit 0
