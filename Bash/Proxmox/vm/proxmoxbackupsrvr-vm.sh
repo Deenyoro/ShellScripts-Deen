@@ -17,9 +17,9 @@ set -euo pipefail
 ###############################################
 #               CONFIGURATION                 #
 ###############################################
-FALLBACK_URL="https://enterprise.proxmox.com/iso/proxmox-backup-server_3.3-1.iso"
-FALLBACK_VERSION="3.3-1"
-FALLBACK_DATE="20241128"  # YYYYMMDD format for fallback
+FALLBACK_URL="https://enterprise.proxmox.com/iso/proxmox-backup-server_3.4-1.iso"
+FALLBACK_VERSION="3.4-1"
+FALLBACK_DATE="20250410"  # YYYYMMDD format for fallback
 FALLBACK_FILENAME="${FALLBACK_DATE}-proxmox-backup-server_${FALLBACK_VERSION}.iso"
 PBS_DOWNLOAD_DIR="https://enterprise.proxmox.com/iso/"
 
@@ -157,7 +157,7 @@ function default_settings() {
     BRG="vmbr0"
     MAC=$(generate_mac)
     VLAN=""
-    MTU="1500"
+    MTU=""
     START_VM="yes"
     VM_TAG="backup"
     EFI_DISK_SIZE="512M"
@@ -451,6 +451,15 @@ fi
 msg_ok "Using $STORAGE for Storage Location."
 msg_ok "Virtual Machine ID is $VMID."
 
+# Prepare the network parameters without vlan-tag syntax error
+NETWORK_OPTS="virtio,bridge=$BRG,macaddr=$MAC"
+if [[ -n "$VLAN" ]]; then
+  NETWORK_OPTS="$NETWORK_OPTS,tag=$VLAN"
+fi
+if [[ -n "$MTU" ]]; then
+  NETWORK_OPTS="$NETWORK_OPTS,mtu=$MTU"
+fi
+
 msg_info "Creating a PBS VM"
 qm create "$VMID" \
   -agent enabled=1 \
@@ -463,7 +472,7 @@ qm create "$VMID" \
   -memory "$RAM_SIZE" \
   -name "$HN" \
   -tags "$VM_TAG" \
-  -net0 "virtio,bridge=$BRG,macaddr=$MAC${VLAN:+,vlan-tag=$VLAN}${MTU:+,mtu=$MTU}" \
+  -net0 "$NETWORK_OPTS" \
   -onboot 1 \
   -ostype l26 \
   -scsihw virtio-scsi-pci
@@ -500,7 +509,7 @@ done
 
 qm set "$VMID" -ide2 "local:iso/$ISO_BASENAME,media=cdrom"
 msg_info "Setting boot order"
-qm set "$VMID" -boot order=ide2;order=scsi0
+qm set "$VMID" -boot "order=ide2,scsi0"
 
 CREATION_DATE=$(date +"%Y-%m-%d")
 ISO_USED="$ISO_BASENAME"
@@ -519,7 +528,7 @@ if (whiptail --backtitle "Proxmox VE PBS Install Script" --title "START VIRTUAL 
     qm stop "$VMID"
     msg_info "Removing CD drive and setting boot to VM drive"
     qm set "$VMID" -delete ide2
-    qm set "$VMID" -boot order=scsi0
+    qm set "$VMID" -boot "order=scsi0"
     qm start "$VMID"
     msg_ok "Removed CD drive and set boot to VM drive"
   else
