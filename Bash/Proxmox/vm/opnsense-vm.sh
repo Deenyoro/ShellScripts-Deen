@@ -63,6 +63,8 @@ CROSS="${RD}✗${CL}"       # Cross
 WARN="${YL}!${CL}"        # Warning
 BFR="\\r\\033[K"          # Line clear
 HOLD="-"                  # Progress indicator
+INFO="${GN}◉${CL}"        # Info indicator
+TAB="  "                  # Tab spacing
 
 function msg_info() {
     echo -ne " ${HOLD} ${YL}${1}...${CL}"
@@ -151,6 +153,7 @@ ENABLE_HTTPS=""
 MANAGE_INTERFACES="yes"
 EFI_DISK_SIZE="8M"
 AUTOMATE_SETUP="no"
+SERIAL_CONSOLE="yes"
 
 function error_handler() {
     local exit_code=$?
@@ -186,7 +189,7 @@ trap cleanup EXIT
 function check_dependencies() {
     # Define the list of required commands
     local deps=(whiptail pvesh pvesm qm wget curl bunzip2 genisoimage)
-    local optional_deps=(xmlstarlet)
+    local optional_deps=(xmlstarlet unxz)
 
     # Map each command to its corresponding Debian package
     declare -A cmd_pkg_map=(
@@ -199,6 +202,7 @@ function check_dependencies() {
         [bunzip2]=bzip2
         [genisoimage]=genisoimage
         [xmlstarlet]=xmlstarlet
+        [unxz]=xz-utils
     )
 
     # Check for optional dependencies
@@ -208,6 +212,10 @@ function check_dependencies() {
             if [[ "$cmd" == "xmlstarlet" ]]; then
                 echo -e "  - Without xmlstarlet, a fallback method will be used for XML processing."
                 echo -e "  - For best results, consider installing xmlstarlet: apt-get install xmlstarlet"
+                echo
+            elif [[ "$cmd" == "unxz" ]]; then
+                echo -e "  - Without unxz, FreeBSD installation method won't work."
+                echo -e "  - Consider installing xz-utils: apt-get install xz-utils"
                 echo
             fi
         fi
@@ -277,19 +285,39 @@ function check_dependencies() {
     msg_ok "All missing dependencies have been handled."
 }
 
-function check_vmid {
-    # We'll increment NEXTID until we find an ID not used by a VM or container
+# Enhanced function to get a valid next VM ID
+function get_valid_nextid() {
+    local try_id
+    try_id=$(pvesh get /cluster/nextid 2>/dev/null || echo $STARTING_VM_ID)
+    
     while true; do
-        if qm list | awk '{print $1}' | grep -qw "$NEXTID"; then
-            ((NEXTID++))
+        # Check if ID is used by a VM
+        if [ -f "/etc/pve/qemu-server/${try_id}.conf" ]; then
+            try_id=$((try_id + 1))
             continue
         fi
-        if pct list 2>/dev/null | awk '{print $1}' | grep -qw "$NEXTID"; then
-            ((NEXTID++))
+        
+        # Check if ID is used by a container
+        if [ -f "/etc/pve/lxc/${try_id}.conf" ]; then
+            try_id=$((try_id + 1))
             continue
         fi
+        
+        # Check if ID is used in LVM
+        if lvs --noheadings -o lv_name 2>/dev/null | grep -qE "(^|[-_])${try_id}($|[-_])"; then
+            try_id=$((try_id + 1))
+            continue
+        fi
+        
         break
     done
+    
+    echo "$try_id"
+}
+
+function check_vmid {
+    # Using the improved function from above
+    NEXTID=$(get_valid_nextid)
     echo "New VMID after increment: $NEXTID"
 }
 
@@ -308,6 +336,7 @@ function check_root() {
 }
 
 function pve_check() {
+    # Enhanced version check supporting PVE 8.0+ and 9.0+
     if ! pveversion | grep -Eq "pve-manager/[8-9]\.[0-9]"; then
         msg_error "This version of Proxmox Virtual Environment is not supported"
         echo -e "Requires Proxmox Virtual Environment Version 8.0 or later."
@@ -368,9 +397,37 @@ function verify_bridge_exists() {
 }
 
 #################################################################################
-# Distinct Functions for Selecting ISO Storage vs. VM Disk Storage
+# Storage Selection Functions                                                   #
 #################################################################################
-# We explicitly filter for storages that have "iso" vs. "images" contents, so you can pick one storage for the ISO and a different storage for VM Disks.
+
+# Enhanced storage validation function
+function validate_storage() {
+    msg_info "Validating Storage"
+    local storage_menu=()
+    local msg_max_length=0
+    
+    while read -r line; do
+        local tag=$(echo $line | awk '{print $1}')
+        local type=$(echo $line | awk '{printf "%-10s", $2}')
+        local free=$(echo $line | numfmt --field 4-6 --from-unit=K --to=iec --format %.2f | awk '{printf( "%9sB", $6)}')
+        local item="  Type: $type Free: $free "
+        local offset=2
+        
+        if [[ $((${#item} + $offset)) -gt ${msg_max_length} ]]; then
+            msg_max_length=$((${#item} + $offset))
+        fi
+        
+        storage_menu+=("$tag" "$item" "OFF")
+    done < <(pvesm status -content images | awk 'NR>1')
+    
+    local valid=$(pvesm status -content images | awk 'NR>1')
+    if [ -z "$valid" ]; then
+        msg_error "Unable to detect a valid storage location."
+        exit 1
+    fi
+    
+    echo "${storage_menu[@]}"
+}
 
 function select_iso_storage() {
     local title="ISO STORAGE"
@@ -380,9 +437,9 @@ function select_iso_storage() {
         [[ -z "$line" || "$line" =~ ^Name ]] && continue
         local tag=$(echo "$line" | awk '{print $1}')
         local stype=$(echo "$line" | awk '{print $2}')
-        local free=$(echo "$line" | awk '{print $6}')
+        local free=$(echo "$line" | numfmt --field 4-6 --from-unit=K --to=iec --format %.2f | awk '{printf( "%9sB", $6)}')
         [[ -z "$tag" ]] && continue
-        local item="Type: $stype, Free: ${free}B"
+        local item="Type: $stype, Free: $free"
         menu_items+=("$tag" "$item")
     done < <(pvesm status -content iso)
 
@@ -409,9 +466,9 @@ function select_disk_storage() {
         [[ -z "$line" || "$line" =~ ^Name ]] && continue
         local tag=$(echo "$line" | awk '{print $1}')
         local stype=$(echo "$line" | awk '{print $2}')
-        local free=$(echo "$line" | awk '{print $6}')
+        local free=$(echo "$line" | numfmt --field 4-6 --from-unit=K --to=iec --format %.2f | awk '{printf( "%9sB", $6)}')
         [[ -z "$tag" ]] && continue
-        local item="Type: $stype, Free: ${free}B"
+        local item="Type: $stype, Free: $free"
         menu_items+=("$tag" "$item")
     done < <(pvesm status -content images)
 
@@ -437,9 +494,9 @@ function select_config_storage() {
         [[ -z "$line" || "$line" =~ ^Name ]] && continue
         local tag=$(echo "$line" | awk '{print $1}')
         local stype=$(echo "$line" | awk '{print $2}')
-        local free=$(echo "$line" | awk '{print $6}')
+        local free=$(echo "$line" | numfmt --field 4-6 --from-unit=K --to=iec --format %.2f | awk '{printf( "%9sB", $6)}')
         [[ -z "$tag" ]] && continue
-        local item="Type: $stype, Free: ${free}B"
+        local item="Type: $stype, Free: $free"
         menu_items+=("$tag" "$item")
     done < <(pvesm status -content iso)
 
@@ -480,17 +537,22 @@ function default_settings() {
     DISK_SIZE="30G"
     EFI_DISK_SIZE="8M"
     AUTOMATE_SETUP="no"
-
+    SERIAL_CONSOLE="yes"
+    VM_TAGS="opnsense,firewall"
+    
     if [ "$MANAGE_INTERFACES" = "yes" ]; then
         BRIDGE1="$DEFAULT_WAN_BRIDGE"
         MAC1=$(generate_mac)
         MTU1="1500"
+        VLAN1=""
         BRIDGE2="$DEFAULT_LAN_BRIDGE"
         MAC2=$(generate_mac)
         MTU2="1500"
+        VLAN2=""
         BRIDGE3="$DEFAULT_MGMT_BRIDGE"
         MAC3=$(generate_mac)
         MTU3="1500"
+        VLAN3=""
     fi
 
     START_VM="yes"
@@ -547,7 +609,23 @@ function advanced_settings() {
         EFI_DISK_SIZE="8M"
     fi
 
+    # New feature: Serial console option
+    if (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+        --title "SERIAL CONSOLE" \
+        --yesno "Enable serial console?" 10 60 --yes-button "Yes" \
+        --no-button "No" --cancel-button "Exit Script"); then
+        SERIAL_CONSOLE="yes"
+    else
+        SERIAL_CONSOLE="no"
+    fi
+
+    # New feature: VM tags
+    VM_TAGS=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+        --inputbox "VM Tags (comma-separated)" 8 60 "opnsense,firewall" \
+        --title "VM TAGS" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+
     if [ "$MANAGE_INTERFACES" = "yes" ]; then
+        # WAN Interface configuration
         BRIDGE1=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
             --inputbox "INTERFACE (1/3) DEFAULT: $DEFAULT_WAN_BRIDGE" 8 60 "$DEFAULT_WAN_BRIDGE" \
             --title "INTERFACE NAME (WAN)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
@@ -557,7 +635,11 @@ function advanced_settings() {
         MTU1=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
             --inputbox "MTU Size for WAN (Default: 1500)" 8 60 "1500" \
             --title "MTU SIZE (WAN)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+        VLAN1=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+            --inputbox "VLAN Tag for WAN (Leave empty for none)" 8 60 "" \
+            --title "VLAN TAG (WAN)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
 
+        # LAN Interface configuration
         BRIDGE2=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
             --inputbox "INTERFACE (2/3) DEFAULT: $DEFAULT_LAN_BRIDGE" 8 60 "$DEFAULT_LAN_BRIDGE" \
             --title "INTERFACE NAME (LAN)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
@@ -567,7 +649,11 @@ function advanced_settings() {
         MTU2=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
             --inputbox "MTU Size for LAN (Default: 1500)" 8 60 "1500" \
             --title "MTU SIZE (LAN)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+        VLAN2=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+            --inputbox "VLAN Tag for LAN (Leave empty for none)" 8 60 "" \
+            --title "VLAN TAG (LAN)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
 
+        # MGMT Interface configuration
         BRIDGE3=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
             --inputbox "INTERFACE (3/3) DEFAULT: $DEFAULT_MGMT_BRIDGE" 8 60 "$DEFAULT_MGMT_BRIDGE" \
             --title "INTERFACE NAME (MGMT)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
@@ -577,6 +663,9 @@ function advanced_settings() {
         MTU3=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
             --inputbox "MTU Size for MGMT (Default: 1500)" 8 60 "1500" \
             --title "MTU SIZE (MGMT)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+        VLAN3=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+            --inputbox "VLAN Tag for MGMT (Leave empty for none)" 8 60 "" \
+            --title "VLAN TAG (MGMT)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
     fi
 
     # Ask if user wants to select an installation method
@@ -607,6 +696,8 @@ function advanced_settings() {
     echo -e "${DGN}Allocated Cores: ${BGN}${CORE_COUNT}${CL}"
     echo -e "${DGN}Allocated RAM: ${BGN}${RAM_SIZE}${CL}"
     echo -e "${DGN}Using Installation Method: ${BGN}${INSTALLATION_METHOD}${CL}"
+    echo -e "${DGN}Serial Console: ${BGN}${SERIAL_CONSOLE}${CL}"
+    echo -e "${DGN}VM Tags: ${BGN}${VM_TAGS}${CL}"
     echo -e "${DGN}Start VM when completed: ${BGN}${START_VM}${CL}"
 }
 
@@ -949,6 +1040,13 @@ function handle_freebsd_download() {
         return
     fi
 
+    # Check if unxz is available
+    if ! command -v unxz &>/dev/null; then
+        msg_error "unxz is not installed. Cannot extract FreeBSD image."
+        msg_info "Install it with: apt-get install xz-utils"
+        exit 1
+    fi
+
     # Check if we have internet connectivity
     if ! ping -c 1 download.freebsd.org &>/dev/null; then
         msg_error "No internet connectivity. Cannot download FreeBSD image."
@@ -1093,15 +1191,6 @@ function volume_exists() {
 ###############################################################################
 # create_vm
 ###############################################################################
-# Purpose:
-#   1) Create the VM shell (qm create).
-#   2) Detect if storage is "dir" => use ".raw" extension, else no extension.
-#   3) Allocate & attach an EFI disk with Overwrite/Next logic.
-#   4) Allocate & attach the main disk with Overwrite/Next logic.
-#   5) Attach the chosen ISO and set boot order (semicolon for PVE 8).
-#   6) Optionally add up to 3 VirtIO NICs if MANAGE_INTERFACES="yes".
-#   7) Final housekeeping (description).
-###############################################################################
 function create_vm() {
     msg_info "Starting creation of an OPNsense VM"
 
@@ -1113,31 +1202,68 @@ function create_vm() {
     local STORAGE_TYPE
     STORAGE_TYPE=$(pvesm status | awk -v s="$VM_STORAGE" '$1 == s {print $2}')
 
-    # If 'dir', we typically need a file extension (e.g. .raw)
-    local extension=""
-    if [[ "$STORAGE_TYPE" == "dir" ]]; then
-        extension=".raw"
-    fi
+    # Determine disk format and extension based on storage type
+    local DISK_EXT=""
+    local DISK_REF=""
+    local DISK_IMPORT=""
+    local THIN=""
+    
+    case $STORAGE_TYPE in
+        nfs|dir)
+            DISK_EXT=".qcow2"
+            DISK_REF="$VMID/"
+            DISK_IMPORT="-format qcow2"
+            THIN=""
+            ;;
+        btrfs)
+            DISK_EXT=".raw"
+            DISK_REF="$VMID/"
+            DISK_IMPORT="-format raw"
+            THIN=""
+            ;;
+        lvm|lvmthin|zfspool)
+            DISK_EXT=""
+            DISK_REF=""
+            DISK_IMPORT=""
+            THIN=""
+            ;;
+        *)
+            # Default for unknown storage types
+            DISK_EXT=""
+            DISK_REF=""
+            DISK_IMPORT=""
+            THIN=""
+            ;;
+    esac
 
     msg_info "Debug: VM_STORAGE='$VM_STORAGE' (type=$STORAGE_TYPE), ISO_STORAGE='$ISO_STORAGE'"
     msg_info "Debug: VMID='$VMID', EFI_DISK_SIZE='$EFI_DISK_SIZE', DISK_SIZE='$DISK_SIZE'"
 
-    # 2) Create the VM shell
+    # Build VLAN parameters
+    local VLAN_PARAMS=""
+    if [ -n "${VLAN1:-}" ]; then VLAN_PARAMS="${VLAN_PARAMS},tag=${VLAN1}"; fi
+
+    # 2) Create the VM shell with all options
     msg_info "Creating VM shell => ID=$VMID, Hostname=$HN"
-    qm create "$VMID" \
-      -agent enabled=1 \
-      -tablet 0 \
-      -bios "$BIOS_TYPE" \
-      -machine "type=$MACHINE" \
-      -cpu "$CPU_TYPE" \
-      -cores "$CORE_COUNT" \
-      -memory "$RAM_SIZE" \
-      -name "$HN" \
-      -tags firewall \
-      -localtime 1 \
-      -onboot 1 \
-      -ostype l26 \
-      -scsihw virtio-scsi-pci
+    
+    # Build the creation command
+    local CREATE_CMD="qm create $VMID"
+    CREATE_CMD="$CREATE_CMD -agent enabled=1"
+    CREATE_CMD="$CREATE_CMD -tablet 0"
+    CREATE_CMD="$CREATE_CMD -bios $BIOS_TYPE"
+    CREATE_CMD="$CREATE_CMD -machine type=$MACHINE"
+    CREATE_CMD="$CREATE_CMD -cpu $CPU_TYPE"
+    CREATE_CMD="$CREATE_CMD -cores $CORE_COUNT"
+    CREATE_CMD="$CREATE_CMD -memory $RAM_SIZE"
+    CREATE_CMD="$CREATE_CMD -name $HN"
+    CREATE_CMD="$CREATE_CMD -tags $VM_TAGS"
+    CREATE_CMD="$CREATE_CMD -localtime 1"
+    CREATE_CMD="$CREATE_CMD -onboot 1"
+    CREATE_CMD="$CREATE_CMD -ostype l26"
+    CREATE_CMD="$CREATE_CMD -scsihw virtio-scsi-pci"
+    
+    # Execute the creation command
+    eval $CREATE_CMD
 
     # verify creation
     if ! qm status "$VMID" &>/dev/null; then
@@ -1148,10 +1274,32 @@ function create_vm() {
     # 3) Optionally add NICs if MANAGE_INTERFACES="yes"
     if [ "$MANAGE_INTERFACES" = "yes" ]; then
         msg_info "Adding up to 3 VirtIO NICs (WAN, LAN, MGMT)"
-        qm set "$VMID" -net0 "virtio,bridge=$BRIDGE1,macaddr=$MAC1,mtu=$MTU1"
-        qm set "$VMID" -net1 "virtio,bridge=$BRIDGE2,macaddr=$MAC2,mtu=$MTU2"
-        qm set "$VMID" -net2 "virtio,bridge=$BRIDGE3,macaddr=$MAC3,mtu=$MTU3"
+        
+        # Build network parameters with VLAN support
+        local NET0_PARAMS="virtio,bridge=$BRIDGE1,macaddr=$MAC1"
+        local NET1_PARAMS="virtio,bridge=$BRIDGE2,macaddr=$MAC2"
+        local NET2_PARAMS="virtio,bridge=$BRIDGE3,macaddr=$MAC3"
+        
+        # Add MTU if not default
+        if [ "${MTU1:-1500}" != "1500" ]; then NET0_PARAMS="${NET0_PARAMS},mtu=$MTU1"; fi
+        if [ "${MTU2:-1500}" != "1500" ]; then NET1_PARAMS="${NET1_PARAMS},mtu=$MTU2"; fi
+        if [ "${MTU3:-1500}" != "1500" ]; then NET2_PARAMS="${NET2_PARAMS},mtu=$MTU3"; fi
+        
+        # Add VLAN tags if specified
+        if [ -n "${VLAN1:-}" ]; then NET0_PARAMS="${NET0_PARAMS},tag=$VLAN1"; fi
+        if [ -n "${VLAN2:-}" ]; then NET1_PARAMS="${NET1_PARAMS},tag=$VLAN2"; fi
+        if [ -n "${VLAN3:-}" ]; then NET2_PARAMS="${NET2_PARAMS},tag=$VLAN3"; fi
+        
+        qm set "$VMID" -net0 "$NET0_PARAMS"
+        qm set "$VMID" -net1 "$NET1_PARAMS"
+        qm set "$VMID" -net2 "$NET2_PARAMS"
         msg_ok "Network interfaces added successfully"
+    fi
+
+    # Add serial console if enabled
+    if [ "$SERIAL_CONSOLE" = "yes" ]; then
+        qm set "$VMID" -serial0 socket
+        msg_ok "Serial console enabled"
     fi
 
     ###########################################################################
@@ -1161,8 +1309,8 @@ function create_vm() {
     local efi_index=0
 
     while true; do
-        local efi_filename="vm-${VMID}-disk-${efi_index}${extension}"
-        local efi_storage_volume="${VM_STORAGE}:${efi_filename}"
+        local efi_filename="vm-${VMID}-disk-${efi_index}${DISK_EXT}"
+        local efi_storage_volume="${VM_STORAGE}:${DISK_REF}${efi_filename}"
 
         msg_info "Debug: Checking EFI disk => $efi_storage_volume"
         if volume_exists "$efi_storage_volume"; then
@@ -1171,7 +1319,7 @@ function create_vm() {
                 --yesno "Would you like to create the EFI disk?\n\nWarning: If a disk already exists with name '$efi_filename', it will be deleted." \
                 12 70 --yes-button "Create" --no-button "Exit Script"; then
                 
-                msg_info "Creating => $efi_storage_volume"
+                msg_info "Removing existing EFI disk => $efi_storage_volume"
                 if ! pvesm free "$efi_storage_volume"; then
                     msg_error "Could not remove existing EFI volume => $efi_storage_volume"
                     exit 1
@@ -1180,8 +1328,12 @@ function create_vm() {
                 msg_info "Allocating EFI => $efi_filename (size=$EFI_DISK_SIZE)"
                 pvesm alloc "$VM_STORAGE" "$VMID" "$efi_filename" "$EFI_DISK_SIZE" --format raw
 
-                # Attach the EFI disk
-                qm set "$VMID" -efidisk0 "${efi_storage_volume},efitype=4m"
+                # Attach the EFI disk with proper format
+                local efi_format=""
+                if [ "$BIOS_TYPE" = "ovmf" ]; then
+                    efi_format=",efitype=4m"
+                fi
+                qm set "$VMID" -efidisk0 "${efi_storage_volume}${efi_format}"
                 msg_ok "EFI disk created & attached => $efi_storage_volume"
                 break
             else
@@ -1193,7 +1345,11 @@ function create_vm() {
             msg_info "Allocating EFI => $efi_filename (size=$EFI_DISK_SIZE)"
             pvesm alloc "$VM_STORAGE" "$VMID" "$efi_filename" "$EFI_DISK_SIZE" --format raw
 
-            qm set "$VMID" -efidisk0 "${efi_storage_volume},efitype=4m"
+            local efi_format=""
+            if [ "$BIOS_TYPE" = "ovmf" ]; then
+                efi_format=",efitype=4m"
+            fi
+            qm set "$VMID" -efidisk0 "${efi_storage_volume}${efi_format}"
             msg_ok "EFI disk created & attached => $efi_storage_volume"
             break
         fi
@@ -1206,8 +1362,8 @@ function create_vm() {
     local main_index=$((efi_index + 1))
 
     while true; do
-        local main_filename="vm-${VMID}-disk-${main_index}${extension}"
-        local main_storage_volume="${VM_STORAGE}:${main_filename}"
+        local main_filename="vm-${VMID}-disk-${main_index}${DISK_EXT}"
+        local main_storage_volume="${VM_STORAGE}:${DISK_REF}${main_filename}"
 
         msg_info "Debug: Checking main disk => $main_storage_volume"
         if volume_exists "$main_storage_volume"; then
@@ -1216,7 +1372,7 @@ function create_vm() {
                 --yesno "Would you like to create the main disk?\n\nWarning: If a disk already exists with name '$main_filename', it will be deleted." \
                 12 70 --yes-button "Create" --no-button "Exit Script"; then
                 
-                msg_info "Creating => $main_storage_volume"
+                msg_info "Removing existing main disk => $main_storage_volume"
                 if ! pvesm free "$main_storage_volume"; then
                     msg_error "Could not remove existing main volume => $main_storage_volume"
                     exit 1
@@ -1225,14 +1381,19 @@ function create_vm() {
                 msg_info "Allocating main disk => $main_filename (size=$DISK_SIZE)"
                 pvesm alloc "$VM_STORAGE" "$VMID" "$main_filename" "$DISK_SIZE" --format raw
 
-                # Attach scsi0 with retries
+                # Attach scsi0 with cache settings
+                local cache_param=""
+                if [ "$DISK_CACHE" = "writeback" ]; then
+                    cache_param="cache=writeback,"
+                fi
+                
                 local attached=false
                 local RETRY_COUNT=5
                 local RETRY_DELAY=3
 
                 for ((attempt=1; attempt<=RETRY_COUNT; attempt++)); do
-                    msg_info "Attempt $attempt: qm set $VMID -scsi0 $main_storage_volume"
-                    if qm set "$VMID" -scsi0 "$main_storage_volume"; then
+                    msg_info "Attempt $attempt: qm set $VMID -scsi0 ${main_storage_volume},${cache_param}${THIN}size=$DISK_SIZE"
+                    if qm set "$VMID" -scsi0 "${main_storage_volume},${cache_param}${THIN}size=$DISK_SIZE"; then
                         msg_ok "Main disk attached => $main_storage_volume"
                         attached=true
                         break
@@ -1255,13 +1416,19 @@ function create_vm() {
             msg_info "Allocating main disk => $main_filename (size=$DISK_SIZE)"
             pvesm alloc "$VM_STORAGE" "$VMID" "$main_filename" "$DISK_SIZE" --format raw
 
+            # Attach with cache settings
+            local cache_param=""
+            if [ "$DISK_CACHE" = "writeback" ]; then
+                cache_param="cache=writeback,"
+            fi
+
             local attached=false
             local RETRY_COUNT=5
             local RETRY_DELAY=3
 
             for ((attempt=1; attempt<=RETRY_COUNT; attempt++)); do
-                msg_info "Attempt $attempt: qm set $VMID -scsi0 $main_storage_volume"
-                if qm set "$VMID" -scsi0 "$main_storage_volume"; then
+                msg_info "Attempt $attempt: qm set $VMID -scsi0 ${main_storage_volume},${cache_param}${THIN}size=$DISK_SIZE"
+                if qm set "$VMID" -scsi0 "${main_storage_volume},${cache_param}${THIN}size=$DISK_SIZE"; then
                     msg_ok "Main disk attached => $main_storage_volume"
                     attached=true
                     break
@@ -1294,7 +1461,7 @@ function create_vm() {
             msg_info "Importing FreeBSD qcow2 image"
             
             # Import the disk
-            if ! qm importdisk "$VMID" "$FREEBSD_QCOW2" "$VM_STORAGE" --format qcow2; then
+            if ! qm importdisk "$VMID" "$FREEBSD_QCOW2" "$VM_STORAGE" ${DISK_IMPORT:-}; then
                 msg_error "Failed to import FreeBSD qcow2 image"
                 exit 1
             fi
@@ -1303,8 +1470,10 @@ function create_vm() {
             local imported_disk=$(qm config "$VMID" | grep -o 'unused[0-9]\+: .*' | head -n 1 | awk '{print $1}' | tr -d ':')
             
             if [ -n "$imported_disk" ]; then
+                # Get the disk reference
+                local disk_ref=$(qm config "$VMID" | grep "^$imported_disk:" | cut -d' ' -f2-)
                 msg_info "Attaching imported disk as scsi1"
-                qm set "$VMID" -"$imported_disk" "scsi1"
+                qm set "$VMID" -scsi1 "$disk_ref"
                 qm set "$VMID" -boot c -bootdisk scsi1
                 msg_ok "FreeBSD image attached and set as boot device"
             else
@@ -1319,22 +1488,54 @@ function create_vm() {
     ###########################################################################
     # 7) Description and final setup
     ###########################################################################
-    local description_text="# OPNsense VM (ID=$VMID)
-Created $CREATION_DATE
-Installation Method: $INSTALLATION_METHOD
-"
+    local description_text="<div align='center'>
+  <h2 style='font-size: 24px; margin: 20px 0;'>OPNsense VM</h2>
+  
+  <p><strong>Created:</strong> $CREATION_DATE</p>
+  <p><strong>Installation Method:</strong> $INSTALLATION_METHOD</p>"
     
     if [ "$INSTALLATION_METHOD" = "iso" ]; then
-        description_text+="ISO Used: $ISO_BASENAME"
+        description_text+="
+  <p><strong>ISO Used:</strong> $ISO_BASENAME</p>"
     else
-        description_text+="Based on FreeBSD qcow2 image"
+        description_text+="
+  <p><strong>Based on:</strong> FreeBSD qcow2 image</p>"
     fi
+    
+    description_text+="
+  
+  <hr style='margin: 20px 0;'>
+  
+  <p style='margin: 16px 0;'>
+    <strong>Resources:</strong><br>
+    CPU: $CORE_COUNT cores ($CPU_TYPE)<br>
+    RAM: $RAM_SIZE MB<br>
+    Disk: $DISK_SIZE
+  </p>
+  
+  <p style='margin: 16px 0;'>
+    <strong>Network Configuration:</strong><br>"
+    
+    if [ "$MANAGE_INTERFACES" = "yes" ]; then
+        description_text+="
+    WAN: Bridge $BRIDGE1 (MAC: $MAC1)<br>
+    LAN: Bridge $BRIDGE2 (MAC: $MAC2)<br>
+    MGMT: Bridge $BRIDGE3 (MAC: $MAC3)"
+    else
+        description_text+="
+    Manual network configuration required"
+    fi
+    
+    description_text+="
+  </p>
+</div>"
     
     qm set "$VMID" -description "$description_text"
     
     msg_ok "Created an OPNsense VM (ID=$VMID) successfully!"
 }
 
+# Enhanced automate_install function with better error handling
 function automate_install() {
     function automate_setup() {
         local LAN_IPV4=$1
@@ -1350,8 +1551,15 @@ function automate_install() {
         echo "DHCP_START: $DHCP_START"
         echo "DHCP_END: $DHCP_END"
         echo "ENABLE_HTTPS: $ENABLE_HTTPS"
-        # Wait for initial boot
-        sleep 150
+        
+        # Wait for initial boot with progress indicator
+        msg_info "Waiting for VM to boot (this may take 2-3 minutes)"
+        for i in {1..30}; do
+            echo -n "."
+            sleep 5
+        done
+        echo
+        
         msg_info "VM booted, sending installer command"
         # Start the installer
         send_line_to_vm "installer"
@@ -1376,8 +1584,15 @@ function automate_install() {
         sleep 5
         qm sendkey $VMID left
         press_enter
-        # Wait for installation
-        sleep 333
+        
+        # Wait for installation with progress indicator
+        msg_info "Installing OPNsense (this will take 5-6 minutes)"
+        for i in {1..66}; do
+            echo -n "."
+            sleep 5
+        done
+        echo
+        
         # Set root password
         press_enter
         sleep 2
@@ -1403,7 +1618,10 @@ function automate_install() {
         qm set $VMID -boot c -bootdisk scsi0
         # Start the VM
         qm start $VMID
+        
+        msg_info "Waiting for OPNsense to boot"
         sleep 80
+        
         # Login as root
         send_line_to_vm "root"
         sleep 2
@@ -1488,6 +1706,7 @@ function automate_install() {
     automate_setup "$LAN_IPV4" "$SUBNET_MASK" "$ENABLE_DHCP" "$DHCP_START" "$DHCP_END" "$ENABLE_HTTPS"
 }
 
+# Enhanced FreeBSD installation with better progress indicators
 function automate_freebsd_install() {
     msg_info "Starting OPNsense installation from FreeBSD base"
     
@@ -1496,8 +1715,13 @@ function automate_freebsd_install() {
         qm start "$VMID"
     fi
     
-    # Wait for boot
-    sleep 90
+    # Wait for boot with progress indicator
+    msg_info "Waiting for FreeBSD to boot"
+    for i in {1..18}; do
+        echo -n "."
+        sleep 5
+    done
+    echo
     
     # Login as root (no password on fresh FreeBSD)
     send_line_to_vm "root"
@@ -1505,21 +1729,27 @@ function automate_freebsd_install() {
     sleep 2
     
     # Download the OPNsense bootstrap script
+    msg_info "Downloading OPNsense bootstrap script"
     send_line_to_vm "fetch https://raw.githubusercontent.com/opnsense/update/master/src/bootstrap/opnsense-bootstrap.sh.in"
     press_enter
     sleep 10
     
     # Run the bootstrap script with recent version
+    msg_info "Running OPNsense bootstrap (this will take 15-20 minutes)"
     send_line_to_vm "sh ./opnsense-bootstrap.sh.in -y -f -r 25.1"
     press_enter
     
-    # This takes a long time - inform the user
+    # This takes a long time - inform the user with progress indicator
     msg_ok "OPNsense bootstrap started. This will take 15-20 minutes to complete."
     echo "Please be patient. The system will automatically configure OPNsense."
     echo "Do not interrupt this process!"
     
-    # Wait for installation to complete (adjust time based on system speed)
-    sleep 900  # 15 minutes
+    # Wait for installation to complete with progress indicator
+    for i in {1..180}; do
+        echo -n "."
+        sleep 5
+    done
+    echo
     
     # Stop VM after installation
     msg_info "Installation should be complete. Stopping VM to finalize configuration"
@@ -1839,11 +2069,19 @@ function create_and_attach_config() {
     msg_ok "Config image created and attached as ide2"
 }
 
+# Enhanced config import with better timing
 function automate_config_import() {
         msg_info "Starting VM"
         qm status "$VMID" | grep -q "running" || qm start "$VMID"
-        # Wait for initial boot
-        sleep 150
+        
+        # Wait for initial boot with progress indicator
+        msg_info "Waiting for VM to boot"
+        for i in {1..30}; do
+            echo -n "."
+            sleep 5
+        done
+        echo
+        
         msg_info "VM booted, sending installer command"
         # Start the installer
         send_line_to_vm "installer"
@@ -1870,8 +2108,15 @@ function automate_config_import() {
         sleep 5
         qm sendkey $VMID left
         press_enter
-        # Wait for installation
-        sleep 333
+        
+        # Wait for installation with progress indicator
+        msg_info "Installing OPNsense"
+        for i in {1..66}; do
+            echo -n "."
+            sleep 5
+        done
+        echo
+        
         # Set root password
         press_enter
         sleep 2
@@ -2074,7 +2319,7 @@ function add_host_network_interfaces() {
 }
 
 #################################################################################
-# Main Script Execution
+# Main Script Execution                                                          #
 #################################################################################
 
 header_info
@@ -2143,7 +2388,7 @@ else
     handle_freebsd_download
 fi
 
-# Create the VM (with Overwrite/Next logic for disks)
+# Create the VM with all enhancements
 create_vm
 
 # Optional config mount or automated setup
@@ -2178,22 +2423,50 @@ if [ "$MANAGE_INTERFACES" = "yes" ]; then
     add_host_network_interfaces
 fi
 
-# Display completion message with IP info if available
+# Display completion message with enhanced info
 msg_ok "Completed Successfully!"
+echo
 
+# Display access information
 if [ -n "$LAN_IPV4" ]; then
-    echo -e "${BL}You can access the OPNsense WebUI at:${CL}"
+    echo -e "${INFO} ${BL}Access Information:${CL}"
+    echo -e "${TAB}${YL}Web Interface:${CL}"
     if [ "$ENABLE_HTTPS" = "y" ]; then
-        echo -e "${GN}https://${LAN_IPV4}/ ${CL}"
+        echo -e "${TAB}  ${GN}https://${LAN_IPV4}/${CL}"
     else
-        echo -e "${GN}http://${LAN_IPV4}/ ${CL}"
+        echo -e "${TAB}  ${GN}http://${LAN_IPV4}/${CL}"
     fi
-    echo -e "Username: ${GN}root${CL}"
-    echo -e "Password: ${GN}[your configured password]${CL}"
+    echo -e "${TAB}${YL}Username:${CL} ${GN}root${CL}"
+    echo -e "${TAB}${YL}Password:${CL} ${GN}[your configured password]${CL}"
 else
-    echo -e "The OPNsense VM has been created. You'll need to discover the IP address to access the WebUI."
-    echo -e "Default username: ${GN}root${CL}"
-    echo -e "Default password: ${GN}opnsense${CL} (if not changed during setup)"
+    echo -e "${INFO} ${YL}The OPNsense VM has been created.${CL}"
+    echo -e "${TAB}You'll need to discover the IP address to access the WebUI."
+    echo -e "${TAB}${YL}Default username:${CL} ${GN}root${CL}"
+    echo -e "${TAB}${YL}Default password:${CL} ${GN}opnsense${CL} (if not changed during setup)"
 fi
 
+# Additional information
+echo
+echo -e "${INFO} ${BL}VM Information:${CL}"
+echo -e "${TAB}${YL}VM ID:${CL} ${GN}$VMID${CL}"
+echo -e "${TAB}${YL}Hostname:${CL} ${GN}$HN${CL}"
+echo -e "${TAB}${YL}Installation Method:${CL} ${GN}$INSTALLATION_METHOD${CL}"
+
+if [ "$SERIAL_CONSOLE" = "yes" ]; then
+    echo -e "${TAB}${YL}Serial Console:${CL} ${GN}Enabled (qm terminal $VMID)${CL}"
+fi
+
+# Network information if interfaces were managed
+if [ "$MANAGE_INTERFACES" = "yes" ]; then
+    echo
+    echo -e "${INFO} ${BL}Network Configuration:${CL}"
+    echo -e "${TAB}${YL}WAN:${CL} Bridge ${GN}$BRIDGE1${CL} (MAC: ${GN}$MAC1${CL})"
+    if [ -n "${VLAN1:-}" ]; then echo -e "${TAB}      VLAN: ${GN}$VLAN1${CL}"; fi
+    echo -e "${TAB}${YL}LAN:${CL} Bridge ${GN}$BRIDGE2${CL} (MAC: ${GN}$MAC2${CL})"
+    if [ -n "${VLAN2:-}" ]; then echo -e "${TAB}      VLAN: ${GN}$VLAN2${CL}"; fi
+    echo -e "${TAB}${YL}MGMT:${CL} Bridge ${GN}$BRIDGE3${CL} (MAC: ${GN}$MAC3${CL})"
+    if [ -n "${VLAN3:-}" ]; then echo -e "${TAB}      VLAN: ${GN}$VLAN3${CL}"; fi
+fi
+
+echo
 exit 0
