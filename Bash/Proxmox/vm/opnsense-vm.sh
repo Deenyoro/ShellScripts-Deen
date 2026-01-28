@@ -10,9 +10,9 @@ set -euo pipefail
 
 # Mirror and fallback settings
 MIRROR_BASE_URL="https://mirrors.ocf.berkeley.edu/opnsense/releases/"
-FALLBACK_URL="https://pkg.opnsense.org/releases/25.1/OPNsense-25.1-dvd-amd64.iso.bz2"
-FALLBACK_RELEASE_DATE="2025-Jan-28"
-FALLBACK_VERSION="25.1"
+FALLBACK_URL="https://pkg.opnsense.org/releases/25.7/OPNsense-25.7-dvd-amd64.iso.bz2"
+FALLBACK_RELEASE_DATE="2025-Jul-15"
+FALLBACK_VERSION="25.7"
 
 # VM ID range
 STARTING_VM_ID=100
@@ -25,6 +25,7 @@ DEFAULT_MGMT_BRIDGE="vmbr2"
 
 # Version and installation method
 INSTALLATION_METHOD="iso"  # iso or freebsd
+# FreeBSD URL will be discovered dynamically; this is a fallback
 FREEBSD_URL="https://download.freebsd.org/releases/VM-IMAGES/14.2-RELEASE/amd64/Latest/FreeBSD-14.2-RELEASE-amd64.qcow2.xz"
 
 #################################################################################
@@ -88,7 +89,7 @@ function msg_error() {
 
 function send_line_to_vm() {
     local line="$1"
-    echo -e "${DGN}Sending to VM: ${BL}$1${CL}"
+    echo -e "${DGN}Sending line: ${BL}$1${CL}"
     for ((i = 0; i < ${#line}; i++)); do
         character=${line:i:1}
         case $character in
@@ -128,8 +129,8 @@ function send_line_to_vm() {
             ")") character="shift-0" ;;
         esac
         qm sendkey $VMID "$character"
-        sleep 0.01
     done
+    qm sendkey $VMID ret
 }
 
 function press_enter() {
@@ -154,6 +155,37 @@ MANAGE_INTERFACES="yes"
 EFI_DISK_SIZE="8M"
 AUTOMATE_SETUP="no"
 SERIAL_CONSOLE="yes"
+IP_ADDR=""
+WAN_IP_ADDR=""
+LAN_GW=""
+WAN_GW=""
+NETMASK=""
+WAN_NETMASK=""
+NETWORK_MODE=""
+BRIDGE1=""
+BRIDGE2=""
+BRIDGE3=""
+MAC1=""
+MAC2=""
+MAC3=""
+MTU1=""
+MTU2=""
+MTU3=""
+VLAN1=""
+VLAN2=""
+VLAN3=""
+START_VM="yes"
+HN=""
+CPU_TYPE=""
+CORE_COUNT=""
+RAM_SIZE=""
+DISK_SIZE=""
+DISK_CACHE=""
+MACHINE=""
+BIOS_TYPE=""
+VM_TAGS=""
+ISO_BASENAME=""
+FREEBSD_QCOW2=""
 
 function error_handler() {
     local exit_code=$?
@@ -336,14 +368,35 @@ function check_root() {
 }
 
 function pve_check() {
-    # Enhanced version check supporting PVE 8.0+ and 9.0+
-    if ! pveversion | grep -Eq "pve-manager/[8-9]\.[0-9]"; then
-        msg_error "This version of Proxmox Virtual Environment is not supported"
-        echo -e "Requires Proxmox Virtual Environment Version 8.0 or later."
-        echo -e "Exiting..."
-        sleep 2
-        exit 1
+    local PVE_VER
+    PVE_VER="$(pveversion | awk -F'/' '{print $2}' | awk -F'-' '{print $1}')"
+
+    # Proxmox VE 8.x: allow 8.0-8.9
+    if [[ "$PVE_VER" =~ ^8\.([0-9]+) ]]; then
+        local MINOR="${BASH_REMATCH[1]}"
+        if ((MINOR < 0 || MINOR > 9)); then
+            msg_error "This version of Proxmox VE is not supported."
+            msg_error "Supported: Proxmox VE version 8.0 - 8.9"
+            exit 1
+        fi
+        return 0
     fi
+
+    # Proxmox VE 9.x: allow 9.0-9.1
+    if [[ "$PVE_VER" =~ ^9\.([0-9]+) ]]; then
+        local MINOR="${BASH_REMATCH[1]}"
+        if ((MINOR < 0 || MINOR > 1)); then
+            msg_error "This version of Proxmox VE is not supported."
+            msg_error "Supported: Proxmox VE version 9.0 - 9.1"
+            exit 1
+        fi
+        return 0
+    fi
+
+    # All other unsupported versions
+    msg_error "This version of Proxmox VE is not supported."
+    msg_error "Supported versions: Proxmox VE 8.0 - 8.9 or 9.0 - 9.1"
+    exit 1
 }
 
 function arch_check() {
@@ -530,86 +583,198 @@ function default_settings() {
     BIOS_TYPE="ovmf"
     MACHINE="q35"
     DISK_CACHE=""
-    HN="OPNsense$VMID"
+    HN="opnsense"
     CPU_TYPE="host"
-    CORE_COUNT="2"
-    RAM_SIZE="2048"
+    CORE_COUNT="4"
+    RAM_SIZE="8192"
     DISK_SIZE="30G"
     EFI_DISK_SIZE="8M"
     AUTOMATE_SETUP="no"
     SERIAL_CONSOLE="yes"
     VM_TAGS="opnsense,firewall"
-    
+    IP_ADDR=""
+    WAN_IP_ADDR=""
+    LAN_GW=""
+    WAN_GW=""
+    NETMASK=""
+    WAN_NETMASK=""
+    NETWORK_MODE="dual"
+
+    echo -e "${DGN}Using Virtual Machine ID: ${BGN}${VMID}${CL}"
+    echo -e "${DGN}Using Hostname: ${BGN}${HN}${CL}"
+    echo -e "${DGN}Allocated Cores: ${BGN}${CORE_COUNT}${CL}"
+    echo -e "${DGN}Allocated RAM: ${BGN}${RAM_SIZE}${CL}"
+
     if [ "$MANAGE_INTERFACES" = "yes" ]; then
         BRIDGE1="$DEFAULT_WAN_BRIDGE"
         MAC1=$(generate_mac)
         MTU1="1500"
         VLAN1=""
-        BRIDGE2="$DEFAULT_LAN_BRIDGE"
-        MAC2=$(generate_mac)
-        MTU2="1500"
-        VLAN2=""
-        BRIDGE3="$DEFAULT_MGMT_BRIDGE"
-        MAC3=$(generate_mac)
-        MTU3="1500"
-        VLAN3=""
+
+        if ! grep -q "^iface ${BRIDGE1}" /etc/network/interfaces 2>/dev/null; then
+            msg_warn "Bridge '${BRIDGE1}' does not exist in /etc/network/interfaces"
+        else
+            echo -e "${DGN}Using LAN Bridge: ${BGN}${BRIDGE1}${CL}"
+        fi
+        echo -e "${DGN}Using LAN MAC Address: ${BGN}${MAC1}${CL}"
+
+        # Network mode selection: dual (firewall/router) or single (proxy/VPN/IDS)
+        if NETWORK_MODE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+            --title "NETWORK CONFIGURATION" --radiolist --cancel-button "Exit Script" \
+            "Choose network setup mode for OPNsense:\n" 14 70 2 \
+            "dual" "Dual Interface (Traditional Firewall/Router)" ON \
+            "single" "Single Interface (Proxy/VPN/IDS Server)" OFF \
+            3>&1 1>&2 2>&3); then
+            if [ "$NETWORK_MODE" = "dual" ]; then
+                echo -e "${DGN}Network Mode: ${BGN}Dual Interface (Firewall)${CL}"
+                BRIDGE2="$DEFAULT_LAN_BRIDGE"
+                MAC2=$(generate_mac)
+                MTU2="1500"
+                VLAN2=""
+                echo -e "${DGN}Using WAN MAC Address: ${BGN}${MAC2}${CL}"
+                if ! grep -q "^iface ${BRIDGE2}" /etc/network/interfaces 2>/dev/null; then
+                    msg_warn "Bridge '${BRIDGE2}' does not exist in /etc/network/interfaces"
+                else
+                    echo -e "${DGN}Using WAN Bridge: ${BGN}${BRIDGE2}${CL}"
+                fi
+                BRIDGE3="$DEFAULT_MGMT_BRIDGE"
+                MAC3=$(generate_mac)
+                MTU3="1500"
+                VLAN3=""
+            else
+                echo -e "${DGN}Network Mode: ${BGN}Single Interface (Proxy/VPN/IDS)${CL}"
+                BRIDGE2=""
+                MAC2=""
+                MTU2=""
+                VLAN2=""
+                BRIDGE3=""
+                MAC3=""
+                MTU3=""
+                VLAN3=""
+            fi
+        else
+            exit_script
+        fi
     fi
 
     START_VM="yes"
+    echo -e "${DGN}Using Interface MTU Size: ${BGN}Default${CL}"
+    echo -e "${DGN}Start VM when completed: ${BGN}yes${CL}"
+    echo -e "${BL}Creating an OPNsense VM using the above default settings${CL}"
     msg_ok "Default settings applied."
 }
 
 function advanced_settings() {
+    local ip_regex='^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$'
+    IP_ADDR=""
+    WAN_IP_ADDR=""
+    LAN_GW=""
+    WAN_GW=""
+    NETMASK=""
+    WAN_NETMASK=""
+
     check_vmid
-    VMID=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --inputbox "Virtual Machine ID (Default: $NEXTID)" 8 60 "$NEXTID" \
-        --title "VIRTUAL MACHINE ID" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+    while true; do
+        VMID=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+            --inputbox "Set Virtual Machine ID" 8 58 "$NEXTID" \
+            --title "VIRTUAL MACHINE ID" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+        if [ -z "$VMID" ]; then
+            VMID="$NEXTID"
+        fi
+        if pct status "$VMID" &>/dev/null || qm status "$VMID" &>/dev/null; then
+            echo -e "${CROSS}${RD} ID $VMID is already in use${CL}"
+            sleep 2
+            continue
+        fi
+        echo -e "${DGN}Virtual Machine ID: ${BGN}$VMID${CL}"
+        break
+    done
 
-    HN=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --inputbox "Hostname (Default: OPNsense${VMID})" 8 60 "OPNsense${VMID}" \
-        --title "HOSTNAME" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+    if MACH=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+        --title "MACHINE TYPE" --radiolist --cancel-button "Exit Script" "Choose Type" 10 58 2 \
+        "i440fx" "Machine i440fx" ON \
+        "q35" "Machine q35" OFF \
+        3>&1 1>&2 2>&3); then
+        if [ "$MACH" = "q35" ]; then
+            MACHINE="q35"
+            BIOS_TYPE="ovmf"
+        else
+            MACHINE="pc"
+            BIOS_TYPE="ovmf"
+        fi
+        echo -e "${DGN}Using Machine Type: ${BGN}$MACH${CL}"
+    else
+        exit_script
+    fi
 
-    BIOS_TYPE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --title "FIRMWARE TYPE" --radiolist "Select firmware type:" 10 60 2 \
-        "seabios" "SeaBIOS (Legacy)" OFF \
-        "ovmf" "OVMF (UEFI)" ON \
-        3>&1 1>&2 2<&3 --cancel-button "Exit Script") || exit_script
+    if CPU_TYPE1=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+        --title "CPU MODEL" --radiolist "Choose" --cancel-button "Exit Script" 10 58 2 \
+        "0" "KVM64 (Default)" ON \
+        "1" "Host" OFF \
+        3>&1 1>&2 2>&3); then
+        if [ "$CPU_TYPE1" = "1" ]; then
+            CPU_TYPE="host"
+            echo -e "${DGN}Using CPU Model: ${BGN}Host${CL}"
+        else
+            CPU_TYPE="kvm64"
+            echo -e "${DGN}Using CPU Model: ${BGN}KVM64${CL}"
+        fi
+    else
+        exit_script
+    fi
 
-    MACHINE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --title "MACHINE TYPE" --radiolist "Select machine type:" 10 60 2 \
-        "q35" "Q35: Modern with PCIe support (recommended)" ON \
-        "pc" "i440fx: Older, less feature-rich" OFF 3>&1 1>&2 2<&3 --cancel-button "Exit Script") || exit_script
+    if DISK_CACHE_SEL=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+        --title "DISK CACHE" --radiolist "Choose" --cancel-button "Exit Script" 10 58 2 \
+        "0" "None (Default)" ON \
+        "1" "Write Through" OFF \
+        3>&1 1>&2 2>&3); then
+        if [ "$DISK_CACHE_SEL" = "1" ]; then
+            DISK_CACHE="writethrough"
+            echo -e "${DGN}Using Disk Cache: ${BGN}Write Through${CL}"
+        else
+            DISK_CACHE=""
+            echo -e "${DGN}Using Disk Cache: ${BGN}None${CL}"
+        fi
+    else
+        exit_script
+    fi
 
-    DISK_CACHE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --title "DISK CACHE" --radiolist "Disk cache type:" 10 60 2 \
-        "none" "None (recommended)" ON \
-        "writeback" "Better performance, riskier" OFF 3>&1 1>&2 2<&3 --cancel-button "Exit Script") || exit_script
-
-    CPU_TYPE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --title "CPU MODEL" --radiolist "CPU model:" 10 60 2 \
-        "host" "Use host CPU features" ON \
-        "kvm64" "Generic" OFF 3>&1 1>&2 2<&3 --cancel-button "Exit Script") || exit_script
+    if VM_NAME=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+        --inputbox "Set Hostname" 8 58 "opnsense" \
+        --title "HOSTNAME" --cancel-button "Exit Script" 3>&1 1>&2 2<&3); then
+        if [ -z "$VM_NAME" ]; then
+            HN="opnsense"
+        else
+            HN=$(echo "${VM_NAME,,}" | tr -d ' ')
+        fi
+        echo -e "${DGN}Using Hostname: ${BGN}$HN${CL}"
+    else
+        exit_script
+    fi
 
     CORE_COUNT=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --inputbox "Number of CPU cores (Default: 2)" 8 60 "2" \
-        --title "CPU CORES" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+        --inputbox "Allocate CPU Cores" 8 58 4 \
+        --title "CORE COUNT" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+    if [ -z "$CORE_COUNT" ]; then CORE_COUNT="4"; fi
+    echo -e "${DGN}Allocated Cores: ${BGN}$CORE_COUNT${CL}"
 
     RAM_SIZE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --inputbox "RAM size in MiB (Default: 2048)" 8 60 "2048" \
-        --title "RAM SIZE" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+        --inputbox "Allocate RAM in MiB" 8 58 8192 \
+        --title "RAM" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+    if [ -z "$RAM_SIZE" ]; then RAM_SIZE="8192"; fi
+    echo -e "${DGN}Allocated RAM: ${BGN}$RAM_SIZE${CL}"
 
     DISK_SIZE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --inputbox "Disk size (Default: 30G)" 8 60 "30G" \
         --title "DISK SIZE" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+    if [ -z "$DISK_SIZE" ]; then DISK_SIZE="30G"; fi
 
     EFI_DISK_SIZE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --inputbox "EFI Disk size (Default: 8M)" 8 60 "8M" \
         --title "EFI DISK SIZE" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
-    if [ -z "$EFI_DISK_SIZE" ]; then
-        EFI_DISK_SIZE="8M"
-    fi
+    if [ -z "$EFI_DISK_SIZE" ]; then EFI_DISK_SIZE="8M"; fi
 
-    # New feature: Serial console option
+    # Serial console option
     if (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --title "SERIAL CONSOLE" \
         --yesno "Enable serial console?" 10 60 --yes-button "Yes" \
@@ -619,56 +784,160 @@ function advanced_settings() {
         SERIAL_CONSOLE="no"
     fi
 
-    # New feature: VM tags
+    # VM tags
     VM_TAGS=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --inputbox "VM Tags (comma-separated)" 8 60 "opnsense,firewall" \
         --title "VM TAGS" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
 
     if [ "$MANAGE_INTERFACES" = "yes" ]; then
-        # WAN Interface configuration
-        BRIDGE1=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "INTERFACE (1/3) DEFAULT: $DEFAULT_WAN_BRIDGE" 8 60 "$DEFAULT_WAN_BRIDGE" \
-            --title "INTERFACE NAME (WAN)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
-        MAC1=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "MAC Address for WAN" 8 60 "$(generate_mac)" \
-            --title "MAC ADDRESS (WAN)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
-        MTU1=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "MTU Size for WAN (Default: 1500)" 8 60 "1500" \
-            --title "MTU SIZE (WAN)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
-        VLAN1=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "VLAN Tag for WAN (Leave empty for none)" 8 60 "" \
-            --title "VLAN TAG (WAN)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+        # LAN Bridge
+        if BRIDGE1=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+            --inputbox "Set a LAN Bridge" 8 58 "$DEFAULT_WAN_BRIDGE" \
+            --title "LAN BRIDGE" --cancel-button "Exit Script" 3>&1 1>&2 2>&3); then
+            if [ -z "$BRIDGE1" ]; then BRIDGE1="$DEFAULT_WAN_BRIDGE"; fi
+            if ! grep -q "^iface ${BRIDGE1}" /etc/network/interfaces 2>/dev/null; then
+                msg_warn "Bridge '${BRIDGE1}' does not exist in /etc/network/interfaces"
+            fi
+            echo -e "${DGN}Using LAN Bridge: ${BGN}$BRIDGE1${CL}"
+        else
+            exit_script
+        fi
 
-        # LAN Interface configuration
-        BRIDGE2=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "INTERFACE (2/3) DEFAULT: $DEFAULT_LAN_BRIDGE" 8 60 "$DEFAULT_LAN_BRIDGE" \
-            --title "INTERFACE NAME (LAN)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
-        MAC2=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "MAC Address for LAN" 8 60 "$(generate_mac)" \
-            --title "MAC ADDRESS (LAN)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
-        MTU2=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "MTU Size for LAN (Default: 1500)" 8 60 "1500" \
-            --title "MTU SIZE (LAN)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
-        VLAN2=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "VLAN Tag for LAN (Leave empty for none)" 8 60 "" \
-            --title "VLAN TAG (LAN)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+        # LAN IP Address
+        if IP_ADDR=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+            --inputbox "Set a LAN IP (leave empty for DHCP)" 8 58 "" \
+            --title "LAN IP ADDRESS" --cancel-button "Exit Script" 3>&1 1>&2 2>&3); then
+            if [ -z "$IP_ADDR" ]; then
+                echo -e "${DGN}Using DHCP as LAN IP ADDRESS${CL}"
+            else
+                if [[ -n "$IP_ADDR" && ! "$IP_ADDR" =~ $ip_regex ]]; then
+                    msg_error "Invalid IP Address format for LAN IP. Needs to be x.x.x.x, was $IP_ADDR"
+                    exit 1
+                fi
+                echo -e "${DGN}Using LAN IP ADDRESS: ${BGN}$IP_ADDR${CL}"
+
+                LAN_GW=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                    --inputbox "Set a LAN Gateway IP" 8 58 "" \
+                    --title "LAN GATEWAY IP ADDRESS" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
+                if [ -z "$LAN_GW" ]; then
+                    msg_error "Gateway needs to be set if IP is not DHCP"
+                    exit_script
+                fi
+                if [[ ! "$LAN_GW" =~ $ip_regex ]]; then
+                    msg_error "Invalid IP Address format for Gateway. Needs to be x.x.x.x, was $LAN_GW"
+                    exit 1
+                fi
+                echo -e "${DGN}Using LAN GATEWAY ADDRESS: ${BGN}$LAN_GW${CL}"
+
+                NETMASK=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                    --inputbox "Set a LAN netmask (e.g. 24)" 8 58 "" \
+                    --title "LAN NETMASK" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
+                if [ -z "$NETMASK" ]; then
+                    msg_error "Netmask needs to be set if IP is not DHCP"
+                    exit_script
+                fi
+                if [[ ! ("$NETMASK" =~ ^[0-9]+$ && "$NETMASK" -ge 1 && "$NETMASK" -le 32) ]]; then
+                    msg_error "Invalid LAN NETMASK format. Needs to be 1-32, was $NETMASK"
+                    exit 1
+                fi
+                echo -e "${DGN}Using LAN NETMASK: ${BGN}$NETMASK${CL}"
+            fi
+        else
+            exit_script
+        fi
+
+        MAC1=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+            --inputbox "Set a LAN MAC Address" 8 58 "$(generate_mac)" \
+            --title "LAN MAC ADDRESS" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+        MTU1="1500"
+        VLAN1=""
+
+        # WAN Bridge
+        if BRIDGE2=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+            --inputbox "Set a WAN Bridge (leave empty for single-interface mode)" 8 58 "$DEFAULT_LAN_BRIDGE" \
+            --title "WAN BRIDGE" --cancel-button "Exit Script" 3>&1 1>&2 2>&3); then
+            if [ -n "$BRIDGE2" ]; then
+                if ! grep -q "^iface ${BRIDGE2}" /etc/network/interfaces 2>/dev/null; then
+                    msg_warn "WAN Bridge '${BRIDGE2}' does not exist in /etc/network/interfaces"
+                fi
+                echo -e "${DGN}Using WAN Bridge: ${BGN}$BRIDGE2${CL}"
+
+                # WAN IP Address
+                if WAN_IP_ADDR=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                    --inputbox "Set a WAN IP (leave empty for DHCP)" 8 58 "" \
+                    --title "WAN IP ADDRESS" --cancel-button "Exit Script" 3>&1 1>&2 2>&3); then
+                    if [ -z "$WAN_IP_ADDR" ]; then
+                        echo -e "${DGN}Using DHCP as WAN IP ADDRESS${CL}"
+                    else
+                        if [[ ! "$WAN_IP_ADDR" =~ $ip_regex ]]; then
+                            msg_error "Invalid IP Address format for WAN IP. Needs to be x.x.x.x, was $WAN_IP_ADDR"
+                            exit 1
+                        fi
+                        echo -e "${DGN}Using WAN IP ADDRESS: ${BGN}$WAN_IP_ADDR${CL}"
+
+                        WAN_GW=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                            --inputbox "Set a WAN Gateway IP" 8 58 "" \
+                            --title "WAN GATEWAY IP ADDRESS" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
+                        if [ -z "$WAN_GW" ]; then
+                            msg_error "Gateway needs to be set if IP is not DHCP"
+                            exit_script
+                        fi
+                        if [[ ! "$WAN_GW" =~ $ip_regex ]]; then
+                            msg_error "Invalid IP Address format for WAN Gateway. Needs to be x.x.x.x, was $WAN_GW"
+                            exit 1
+                        fi
+                        echo -e "${DGN}Using WAN GATEWAY ADDRESS: ${BGN}$WAN_GW${CL}"
+
+                        WAN_NETMASK=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                            --inputbox "Set a WAN netmask (e.g. 24)" 8 58 "" \
+                            --title "WAN NETMASK" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
+                        if [ -z "$WAN_NETMASK" ]; then
+                            msg_error "WAN Netmask needs to be set if IP is not DHCP"
+                            exit_script
+                        fi
+                        if [[ ! ("$WAN_NETMASK" =~ ^[0-9]+$ && "$WAN_NETMASK" -ge 1 && "$WAN_NETMASK" -le 32) ]]; then
+                            msg_error "Invalid WAN NETMASK format. Needs to be 1-32, was $WAN_NETMASK"
+                            exit 1
+                        fi
+                        echo -e "${DGN}Using WAN NETMASK: ${BGN}$WAN_NETMASK${CL}"
+                    fi
+                else
+                    exit_script
+                fi
+
+                MAC2=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                    --inputbox "Set a WAN MAC Address" 8 58 "$(generate_mac)" \
+                    --title "WAN MAC ADDRESS" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+                MTU2="1500"
+                VLAN2=""
+            else
+                echo -e "${DGN}Network Mode: ${BGN}Single Interface (Proxy/VPN/IDS)${CL}"
+                MAC2=""
+                MTU2=""
+                VLAN2=""
+            fi
+        else
+            exit_script
+        fi
 
         # MGMT Interface configuration
         BRIDGE3=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "INTERFACE (3/3) DEFAULT: $DEFAULT_MGMT_BRIDGE" 8 60 "$DEFAULT_MGMT_BRIDGE" \
+            --inputbox "INTERFACE (MGMT) DEFAULT: $DEFAULT_MGMT_BRIDGE (leave empty to skip)" 8 60 "$DEFAULT_MGMT_BRIDGE" \
             --title "INTERFACE NAME (MGMT)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
-        MAC3=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "MAC Address for MGMT" 8 60 "$(generate_mac)" \
-            --title "MAC ADDRESS (MGMT)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
-        MTU3=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "MTU Size for MGMT (Default: 1500)" 8 60 "1500" \
-            --title "MTU SIZE (MGMT)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
-        VLAN3=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-            --inputbox "VLAN Tag for MGMT (Leave empty for none)" 8 60 "" \
-            --title "VLAN TAG (MGMT)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+        if [ -n "$BRIDGE3" ]; then
+            MAC3=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                --inputbox "MAC Address for MGMT" 8 60 "$(generate_mac)" \
+                --title "MAC ADDRESS (MGMT)" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+            MTU3="1500"
+            VLAN3=""
+        else
+            MAC3=""
+            MTU3=""
+            VLAN3=""
+        fi
     fi
 
-    # Ask if user wants to select an installation method
+    # Installation method
     if INSTALL_METHOD=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --title "INSTALLATION METHOD" --radiolist "Choose installation method:" 10 60 2 \
         "iso" "ISO Installation (Traditional)" ON \
@@ -688,7 +957,7 @@ function advanced_settings() {
     else
         START_VM="no"
     fi
-    
+
     echo -e "${DGN}Virtual Machine ID: ${BGN}${VMID}${CL}"
     echo -e "${DGN}Using Machine Type: ${BGN}${MACHINE}${CL}"
     echo -e "${DGN}Using Hostname: ${BGN}${HN}${CL}"
@@ -699,6 +968,16 @@ function advanced_settings() {
     echo -e "${DGN}Serial Console: ${BGN}${SERIAL_CONSOLE}${CL}"
     echo -e "${DGN}VM Tags: ${BGN}${VM_TAGS}${CL}"
     echo -e "${DGN}Start VM when completed: ${BGN}${START_VM}${CL}"
+
+    if (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+        --title "ADVANCED SETTINGS COMPLETE" \
+        --yesno "Ready to create OPNsense VM?" --no-button "Do-Over" 10 58); then
+        echo -e "${RD}Creating an OPNsense VM using the above advanced settings${CL}"
+    else
+        header_info
+        echo -e "${RD}Using Advanced Settings${CL}"
+        advanced_settings
+    fi
 }
 
 function select_installation_method() {
@@ -1060,28 +1339,56 @@ function handle_freebsd_download() {
         fi
     fi
 
-    local freebsd_file="FreeBSD-14.2-RELEASE-amd64.qcow2"
+    # Dynamically discover the latest stable FreeBSD amd64 qcow2 VM image
+    msg_info "Retrieving the URL for the FreeBSD Qcow2 Disk Image"
+    local RELEASE_LIST
+    RELEASE_LIST="$(curl -s https://download.freebsd.org/releases/VM-IMAGES/ |
+        grep -Eo '[0-9]+\.[0-9]+-RELEASE' |
+        sort -Vr |
+        uniq)"
+
+    local DISCOVERED_URL=""
+    local FREEBSD_VER=""
+    for ver in $RELEASE_LIST; do
+        local candidate="https://download.freebsd.org/releases/VM-IMAGES/${ver}/amd64/Latest/FreeBSD-${ver}-amd64.qcow2.xz"
+        if curl -fsI "$candidate" >/dev/null 2>&1; then
+            FREEBSD_VER="$ver"
+            DISCOVERED_URL="$candidate"
+            break
+        fi
+    done
+
+    if [ -z "$DISCOVERED_URL" ]; then
+        msg_warn "Could not find latest FreeBSD release dynamically. Using fallback URL."
+        DISCOVERED_URL="$FREEBSD_URL"
+        FREEBSD_VER="14.2-RELEASE"
+    fi
+
+    msg_ok "Found FreeBSD $FREEBSD_VER: ${DISCOVERED_URL}"
+
     local temp_dir=$(mktemp -d)
-    
+    local download_file="$(basename "$DISCOVERED_URL")"
+
     msg_info "Downloading FreeBSD image for OPNsense installation"
-    if ! wget -q --show-progress "$FREEBSD_URL" -O "$temp_dir/freebsd.qcow2.xz"; then
+    if ! curl -f#SL -o "$temp_dir/$download_file" "$DISCOVERED_URL"; then
         msg_error "Failed to download FreeBSD image"
         rm -rf "$temp_dir"
         exit 1
     fi
-    
+
     msg_ok "Downloaded FreeBSD image"
     msg_info "Extracting FreeBSD image..."
-    
-    if ! unxz -c "$temp_dir/freebsd.qcow2.xz" > "$temp_dir/$freebsd_file"; then
+
+    local freebsd_file="FreeBSD.qcow2"
+    if ! unxz -cv "$temp_dir/$download_file" > "$temp_dir/$freebsd_file"; then
         msg_error "Failed to extract FreeBSD image"
         rm -rf "$temp_dir"
         exit 1
     fi
-    
+
     # Store reference to the extracted file
     FREEBSD_QCOW2="$temp_dir/$freebsd_file"
-    
+
     msg_ok "Extracted FreeBSD image: $freebsd_file"
 }
 
@@ -1273,26 +1580,33 @@ function create_vm() {
 
     # 3) Optionally add NICs if MANAGE_INTERFACES="yes"
     if [ "$MANAGE_INTERFACES" = "yes" ]; then
-        msg_info "Adding up to 3 VirtIO NICs (WAN, LAN, MGMT)"
-        
-        # Build network parameters with VLAN support
+        msg_info "Adding VirtIO NICs"
+
+        # LAN interface (always present)
         local NET0_PARAMS="virtio,bridge=$BRIDGE1,macaddr=$MAC1"
-        local NET1_PARAMS="virtio,bridge=$BRIDGE2,macaddr=$MAC2"
-        local NET2_PARAMS="virtio,bridge=$BRIDGE3,macaddr=$MAC3"
-        
-        # Add MTU if not default
         if [ "${MTU1:-1500}" != "1500" ]; then NET0_PARAMS="${NET0_PARAMS},mtu=$MTU1"; fi
-        if [ "${MTU2:-1500}" != "1500" ]; then NET1_PARAMS="${NET1_PARAMS},mtu=$MTU2"; fi
-        if [ "${MTU3:-1500}" != "1500" ]; then NET2_PARAMS="${NET2_PARAMS},mtu=$MTU3"; fi
-        
-        # Add VLAN tags if specified
         if [ -n "${VLAN1:-}" ]; then NET0_PARAMS="${NET0_PARAMS},tag=$VLAN1"; fi
-        if [ -n "${VLAN2:-}" ]; then NET1_PARAMS="${NET1_PARAMS},tag=$VLAN2"; fi
-        if [ -n "${VLAN3:-}" ]; then NET2_PARAMS="${NET2_PARAMS},tag=$VLAN3"; fi
-        
         qm set "$VMID" -net0 "$NET0_PARAMS"
-        qm set "$VMID" -net1 "$NET1_PARAMS"
-        qm set "$VMID" -net2 "$NET2_PARAMS"
+        msg_ok "LAN interface added (bridge=$BRIDGE1)"
+
+        # WAN interface (only in dual-interface mode)
+        if [ -n "${BRIDGE2:-}" ]; then
+            local NET1_PARAMS="virtio,bridge=$BRIDGE2,macaddr=$MAC2"
+            if [ "${MTU2:-1500}" != "1500" ]; then NET1_PARAMS="${NET1_PARAMS},mtu=$MTU2"; fi
+            if [ -n "${VLAN2:-}" ]; then NET1_PARAMS="${NET1_PARAMS},tag=$VLAN2"; fi
+            qm set "$VMID" -net1 "$NET1_PARAMS"
+            msg_ok "WAN interface added (bridge=$BRIDGE2)"
+        fi
+
+        # MGMT interface (optional)
+        if [ -n "${BRIDGE3:-}" ]; then
+            local NET2_PARAMS="virtio,bridge=$BRIDGE3,macaddr=$MAC3"
+            if [ "${MTU3:-1500}" != "1500" ]; then NET2_PARAMS="${NET2_PARAMS},mtu=$MTU3"; fi
+            if [ -n "${VLAN3:-}" ]; then NET2_PARAMS="${NET2_PARAMS},tag=$VLAN3"; fi
+            qm set "$VMID" -net2 "$NET2_PARAMS"
+            msg_ok "MGMT interface added (bridge=$BRIDGE3)"
+        fi
+
         msg_ok "Network interfaces added successfully"
     fi
 
@@ -1383,10 +1697,10 @@ function create_vm() {
 
                 # Attach scsi0 with cache settings
                 local cache_param=""
-                if [ "$DISK_CACHE" = "writeback" ]; then
-                    cache_param="cache=writeback,"
+                if [ -n "$DISK_CACHE" ]; then
+                    cache_param="cache=${DISK_CACHE},"
                 fi
-                
+
                 local attached=false
                 local RETRY_COUNT=5
                 local RETRY_DELAY=3
@@ -1418,8 +1732,8 @@ function create_vm() {
 
             # Attach with cache settings
             local cache_param=""
-            if [ "$DISK_CACHE" = "writeback" ]; then
-                cache_param="cache=writeback,"
+            if [ -n "$DISK_CACHE" ]; then
+                cache_param="cache=${DISK_CACHE},"
             fi
 
             local attached=false
@@ -1488,44 +1802,48 @@ function create_vm() {
     ###########################################################################
     # 7) Description and final setup
     ###########################################################################
-    local description_text="<div align='center'>
+    local description_text
+    description_text=$(cat <<DESCEOF
+<div align='center'>
+  <a href='https://opnsense.org' target='_blank' rel='noopener noreferrer'>
+    <img src='https://opnsense.org/wp-content/themes/flavor/flavour-starter/assets/img/opnsense.png' alt='OPNsense Logo' style='width:120px;'/>
+  </a>
+
   <h2 style='font-size: 24px; margin: 20px 0;'>OPNsense VM</h2>
-  
+
   <p><strong>Created:</strong> $CREATION_DATE</p>
-  <p><strong>Installation Method:</strong> $INSTALLATION_METHOD</p>"
-    
-    if [ "$INSTALLATION_METHOD" = "iso" ]; then
-        description_text+="
-  <p><strong>ISO Used:</strong> $ISO_BASENAME</p>"
-    else
-        description_text+="
-  <p><strong>Based on:</strong> FreeBSD qcow2 image</p>"
-    fi
-    
-    description_text+="
-  
+  <p><strong>Installation Method:</strong> $INSTALLATION_METHOD</p>
+  <p><strong>OPNsense Version:</strong> $FALLBACK_VERSION</p>
+
   <hr style='margin: 20px 0;'>
-  
+
   <p style='margin: 16px 0;'>
     <strong>Resources:</strong><br>
     CPU: $CORE_COUNT cores ($CPU_TYPE)<br>
     RAM: $RAM_SIZE MB<br>
     Disk: $DISK_SIZE
   </p>
-  
+
   <p style='margin: 16px 0;'>
-    <strong>Network Configuration:</strong><br>"
-    
+    <strong>Network Configuration:</strong><br>
+DESCEOF
+    )
+
     if [ "$MANAGE_INTERFACES" = "yes" ]; then
-        description_text+="
-    WAN: Bridge $BRIDGE1 (MAC: $MAC1)<br>
-    LAN: Bridge $BRIDGE2 (MAC: $MAC2)<br>
-    MGMT: Bridge $BRIDGE3 (MAC: $MAC3)"
+        description_text+="    LAN: Bridge ${BRIDGE1} (MAC: ${MAC1})<br>"
+        if [ -n "${BRIDGE2:-}" ]; then
+            description_text+="
+    WAN: Bridge ${BRIDGE2} (MAC: ${MAC2})<br>"
+        fi
+        if [ -n "${BRIDGE3:-}" ]; then
+            description_text+="
+    MGMT: Bridge ${BRIDGE3} (MAC: ${MAC3})<br>"
+        fi
     else
         description_text+="
     Manual network configuration required"
     fi
-    
+
     description_text+="
   </p>
 </div>"
@@ -1563,9 +1881,7 @@ function automate_install() {
         msg_info "VM booted, sending installer command"
         # Start the installer
         send_line_to_vm "installer"
-        press_enter
         send_line_to_vm "opnsense"
-        press_enter
         # Wait for keymap selection
         sleep 10
         press_enter
@@ -1584,7 +1900,7 @@ function automate_install() {
         sleep 5
         qm sendkey $VMID left
         press_enter
-        
+
         # Wait for installation with progress indicator
         msg_info "Installing OPNsense (this will take 5-6 minutes)"
         for i in {1..66}; do
@@ -1592,15 +1908,13 @@ function automate_install() {
             sleep 5
         done
         echo
-        
+
         # Set root password
         press_enter
         sleep 2
         send_line_to_vm "$ROOT_PASSWORD"
-        press_enter
         sleep 2
         send_line_to_vm "$ROOT_PASSWORD"
-        press_enter
         # Confirm reboot
         sleep 20
         qm sendkey $VMID down
@@ -1618,92 +1932,71 @@ function automate_install() {
         qm set $VMID -boot c -bootdisk scsi0
         # Start the VM
         qm start $VMID
-        
+
         msg_info "Waiting for OPNsense to boot"
         sleep 80
-        
+
         # Login as root
         send_line_to_vm "root"
         sleep 2
-        press_enter
         send_line_to_vm "$ROOT_PASSWORD"
         sleep 2
-        press_enter
-        sleep 2
-        
-        # Configure network interfaces
-        send_line_to_vm "2"  # Select option 2 (Set interface IP address)
-        press_enter
+
+        # Configure LAN interface
+        send_line_to_vm "2"
         sleep 3
-        
+
         if [ -n "$LAN_IPV4" ]; then
-            send_line_to_vm "n"  # No DHCP
-            press_enter
-            sleep 3
-            send_line_to_vm "$LAN_IPV4"  # Static IP
-            press_enter
-            sleep 3
-            send_line_to_vm "$SUBNET_MASK"  # Subnet mask
-            sleep 3
-            press_enter
-            press_enter  # Skip upstream IP
-            sleep 3
-            send_line_to_vm "n"  # No IPv6
-            sleep 3
-            press_enter
-            sleep 3
-            press_enter  # Set IPv6
-            sleep 6
-
-            if [ "$ENABLE_DHCP" = "yes" ]; then
-                send_line_to_vm "y"  # Enable DHCP
-                sleep 3
-                press_enter
-                send_line_to_vm "$DHCP_START"  # DHCP start
-                press_enter
-                sleep 3
-                send_line_to_vm "$DHCP_END"  # DHCP end
-                press_enter
-                sleep 3
-            else
-                send_line_to_vm "n"  # No DHCP
-                sleep 3
-                press_enter
-                sleep 3
-            fi
+            send_line_to_vm "1"
+            send_line_to_vm "n"
+            send_line_to_vm "${LAN_IPV4}"
+            send_line_to_vm "${SUBNET_MASK}"
+            send_line_to_vm "${LAN_GW:-}"
+            send_line_to_vm "n"
+            send_line_to_vm " "
+            send_line_to_vm "n"
+            send_line_to_vm "n"
+            send_line_to_vm " "
+            send_line_to_vm "n"
+            send_line_to_vm "n"
+            send_line_to_vm "n"
+            send_line_to_vm "n"
+            send_line_to_vm "n"
         else
-            # Using DHCP for LAN
-            send_line_to_vm "y"  # Yes DHCP
-            press_enter
-            sleep 3
-            send_line_to_vm "n"  # No IPv6
-            sleep 3
-            press_enter
-            sleep 3
-            press_enter  # Set IPv6
-            sleep 6
-            
-            # DHCP server not possible with DHCP client
-            send_line_to_vm "n"  # No DHCP server
-            sleep 3
-            press_enter
-            sleep 3
+            send_line_to_vm "1"
+            send_line_to_vm "y"
+            send_line_to_vm "n"
+            send_line_to_vm "n"
+            send_line_to_vm " "
+            send_line_to_vm "n"
+            send_line_to_vm "n"
+            send_line_to_vm "n"
         fi
 
-        # HTTPS setting
-        if [ "$ENABLE_HTTPS" = "n" ]; then
-            send_line_to_vm "y"  # Disable HTTPS redirect
-        else
-            send_line_to_vm "n"  # Keep HTTPS enabled
-            sleep 2
-            press_enter
+        # Wait for config changes to be saved
+        sleep 20
+
+        # Configure WAN interface if dual-interface mode with static IP
+        if [ -n "${BRIDGE2:-}" ] && [ -n "${WAN_IP_ADDR:-}" ]; then
+            send_line_to_vm "2"
+            send_line_to_vm "2"
+            send_line_to_vm "n"
+            send_line_to_vm "${WAN_IP_ADDR}"
+            send_line_to_vm "${WAN_NETMASK:-24}"
+            send_line_to_vm "${WAN_GW:-}"
+            send_line_to_vm "n"
+            send_line_to_vm " "
+            send_line_to_vm "n"
+            send_line_to_vm " "
+            send_line_to_vm "n"
+            send_line_to_vm "n"
+            send_line_to_vm "n"
         fi
-        sleep 3
-        press_enter
-        sleep 3
-        press_enter
+
+        sleep 10
+        send_line_to_vm "0"
     }
-    automate_setup "$LAN_IPV4" "$SUBNET_MASK" "$ENABLE_DHCP" "$DHCP_START" "$DHCP_END" "$ENABLE_HTTPS"
+    automate_setup "${LAN_IPV4:-}" "${SUBNET_MASK:-}" "${ENABLE_DHCP:-}" "${DHCP_START:-}" "${DHCP_END:-}" "${ENABLE_HTTPS:-}"
 }
 
 # Enhanced FreeBSD installation with better progress indicators
@@ -1725,19 +2018,16 @@ function automate_freebsd_install() {
     
     # Login as root (no password on fresh FreeBSD)
     send_line_to_vm "root"
-    press_enter
     sleep 2
-    
+
     # Download the OPNsense bootstrap script
     msg_info "Downloading OPNsense bootstrap script"
     send_line_to_vm "fetch https://raw.githubusercontent.com/opnsense/update/master/src/bootstrap/opnsense-bootstrap.sh.in"
-    press_enter
     sleep 10
     
     # Run the bootstrap script with recent version
     msg_info "Running OPNsense bootstrap (this will take 15-20 minutes)"
-    send_line_to_vm "sh ./opnsense-bootstrap.sh.in -y -f -r 25.1"
-    press_enter
+    send_line_to_vm "sh ./opnsense-bootstrap.sh.in -y -f -r 25.7"
     
     # This takes a long time - inform the user with progress indicator
     msg_ok "OPNsense bootstrap started. This will take 15-20 minutes to complete."
@@ -1769,72 +2059,62 @@ function automate_freebsd_install() {
     
     # Login with default credentials
     send_line_to_vm "root"
-    press_enter
-    sleep 2
     send_line_to_vm "opnsense"
-    press_enter
     sleep 2
-    
-    # Set the root password
-    send_line_to_vm "8"  # Shell option
-    press_enter
+    send_line_to_vm "2"
     sleep 2
-    send_line_to_vm "passwd"
-    press_enter
-    sleep 2
-    send_line_to_vm "$ROOT_PASSWORD"
-    press_enter
-    sleep 2
-    send_line_to_vm "$ROOT_PASSWORD"
-    press_enter
-    sleep 2
-    send_line_to_vm "exit"
-    press_enter
-    sleep 2
-    
-    # Now configure networking if needed
-    if [ -n "$LAN_IPV4" ]; then
-        send_line_to_vm "2"  # Set interface IP address
-        press_enter
-        sleep 3
-        send_line_to_vm "n"  # No DHCP
-        press_enter
-        sleep 3
-        send_line_to_vm "$LAN_IPV4"  # Static IP
-        press_enter
-        sleep 3
-        send_line_to_vm "$SUBNET_MASK"  # Subnet mask
-        press_enter
-        sleep 3
-        press_enter  # Skip upstream gateway
-        sleep 3
-        send_line_to_vm "n"  # No IPv6
-        press_enter
-        sleep 3
-        press_enter  # Skip IPv6
-        sleep 3
-        
-        if [ "$ENABLE_DHCP" = "yes" ]; then
-            send_line_to_vm "y"  # Enable DHCP server
-            press_enter
-            sleep 3
-            send_line_to_vm "$DHCP_START"
-            press_enter
-            sleep 3
-            send_line_to_vm "$DHCP_END"
-            press_enter
-            sleep 3
-        else
-            send_line_to_vm "n"  # No DHCP server
-            press_enter
-            sleep 3
-        fi
+
+    # Configure LAN interface
+    if [ -n "${IP_ADDR:-}" ]; then
+        send_line_to_vm "1"
+        send_line_to_vm "n"
+        send_line_to_vm "${IP_ADDR}"
+        send_line_to_vm "${NETMASK:-24}"
+        send_line_to_vm "${LAN_GW:-}"
+        send_line_to_vm "n"
+        send_line_to_vm " "
+        send_line_to_vm "n"
+        send_line_to_vm "n"
+        send_line_to_vm " "
+        send_line_to_vm "n"
+        send_line_to_vm "n"
+        send_line_to_vm "n"
+        send_line_to_vm "n"
+        send_line_to_vm "n"
+    else
+        send_line_to_vm "1"
+        send_line_to_vm "y"
+        send_line_to_vm "n"
+        send_line_to_vm "n"
+        send_line_to_vm " "
+        send_line_to_vm "n"
+        send_line_to_vm "n"
+        send_line_to_vm "n"
     fi
-    
-    # Complete setup
-    send_line_to_vm "0"  # Exit to console
-    press_enter
-    
+
+    # Wait for config changes to be saved
+    sleep 20
+
+    # Configure WAN interface if dual-interface mode
+    if [ -n "${BRIDGE2:-}" ] && [ -n "${WAN_IP_ADDR:-}" ]; then
+        send_line_to_vm "2"
+        send_line_to_vm "2"
+        send_line_to_vm "n"
+        send_line_to_vm "${WAN_IP_ADDR}"
+        send_line_to_vm "${WAN_NETMASK:-24}"
+        send_line_to_vm "${WAN_GW:-}"
+        send_line_to_vm "n"
+        send_line_to_vm " "
+        send_line_to_vm "n"
+        send_line_to_vm " "
+        send_line_to_vm "n"
+        send_line_to_vm "n"
+        send_line_to_vm "n"
+    fi
+
+    sleep 10
+    send_line_to_vm "0"
+
     msg_ok "OPNsense FreeBSD installation completed and configured"
 }
 
@@ -2085,9 +2365,7 @@ function automate_config_import() {
         msg_info "VM booted, sending installer command"
         # Start the installer
         send_line_to_vm "installer"
-        press_enter
         send_line_to_vm "opnsense"
-        press_enter
         # Wait for keymap selection
         sleep 10
         press_enter
@@ -2108,7 +2386,7 @@ function automate_config_import() {
         sleep 5
         qm sendkey $VMID left
         press_enter
-        
+
         # Wait for installation with progress indicator
         msg_info "Installing OPNsense"
         for i in {1..66}; do
@@ -2116,15 +2394,13 @@ function automate_config_import() {
             sleep 5
         done
         echo
-        
+
         # Set root password
         press_enter
         sleep 2
         send_line_to_vm "$ROOT_PASSWORD"
-        press_enter
         sleep 2
         send_line_to_vm "$ROOT_PASSWORD"
-        press_enter
         # Confirm reboot
         sleep 20
         qm sendkey $VMID down
@@ -2148,48 +2424,33 @@ function automate_config_import() {
         # Login as root
         send_line_to_vm "root"
         sleep 2
-        press_enter
         send_line_to_vm "$ROOT_PASSWORD"
         sleep 2
-        press_enter
         # Import Config from Mounted ISO
         sleep 4
         send_line_to_vm "8"
         sleep 2
-        press_enter
-        sleep 2
         send_line_to_vm "opnsense-importer"
-        sleep 2
-        press_enter
         sleep 2
         send_line_to_vm "cd0"
         sleep 2
-        press_enter
         # After successful import, cleanup and restart
         sleep 25
         send_line_to_vm "exit"
-        press_enter
         sleep 2
         # Set root password again
         send_line_to_vm "3"
-        press_enter
         sleep 2
         send_line_to_vm "y"
-        press_enter
         sleep 2
         send_line_to_vm "$ROOT_PASSWORD"
-        press_enter
         sleep 2
         send_line_to_vm "$ROOT_PASSWORD"
-        press_enter
         sleep 2
         # Reboot VM
         send_line_to_vm "6"
-        press_enter
         sleep 2
         send_line_to_vm "Y"
-        sleep 2
-        press_enter
         sleep 150
         # Force remove ISO from mount list
         msg_info "Stopping VM for cleanup"
@@ -2233,19 +2494,11 @@ function add_host_network_interfaces() {
             echo "Available physical interfaces:"
             echo "$PHYSICAL_INTERFACES"
 
-            BRIDGE_PORT_WAN=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-                --inputbox "Enter bridge-ports for $BRIDGE1 (WAN)" 8 60 --title "BRIDGE-PORTS (WAN)" \
-                --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
-
             BRIDGE_PORT_LAN=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-                --inputbox "Enter bridge-ports for $BRIDGE2 (LAN)" 8 60 --title "BRIDGE-PORTS (LAN)" \
+                --inputbox "Enter bridge-ports for $BRIDGE1 (LAN)" 8 60 --title "BRIDGE-PORTS (LAN)" \
                 --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
 
-            BRIDGE_PORT_MGMT=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-                --inputbox "Enter bridge-ports for $BRIDGE3 (MGMT)" 8 60 --title "BRIDGE-PORTS (MGMT)" \
-                --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
-
-            # Check if bridges already exist
+            # LAN bridge
             if grep -q "^iface $BRIDGE1" /etc/network/interfaces; then
                 msg_warn "Bridge $BRIDGE1 already exists in /etc/network/interfaces"
                 if ! (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
@@ -2254,61 +2507,73 @@ function add_host_network_interfaces() {
                     10 60 --yes-button "Overwrite" --no-button "Skip"); then
                     msg_info "Skipping $BRIDGE1 configuration"
                 else
-                    # Remove existing bridge config
                     sed -i "/^auto $BRIDGE1/,/^$/d" /etc/network/interfaces
-                    echo -e "\nauto $BRIDGE1\niface $BRIDGE1 inet manual\n\tbridge-ports $BRIDGE_PORT_WAN\n\tbridge-stp off\n\tbridge-fd 0" >> /etc/network/interfaces
+                    echo -e "\nauto $BRIDGE1\niface $BRIDGE1 inet manual\n\tbridge-ports $BRIDGE_PORT_LAN\n\tbridge-stp off\n\tbridge-fd 0" >> /etc/network/interfaces
                     msg_ok "Updated $BRIDGE1 configuration"
                 fi
             else
-                echo -e "\nauto $BRIDGE1\niface $BRIDGE1 inet manual\n\tbridge-ports $BRIDGE_PORT_WAN\n\tbridge-stp off\n\tbridge-fd 0" >> /etc/network/interfaces
+                echo -e "\nauto $BRIDGE1\niface $BRIDGE1 inet manual\n\tbridge-ports $BRIDGE_PORT_LAN\n\tbridge-stp off\n\tbridge-fd 0" >> /etc/network/interfaces
                 msg_ok "Added $BRIDGE1 configuration"
             fi
-            
-            if grep -q "^iface $BRIDGE2" /etc/network/interfaces; then
-                msg_warn "Bridge $BRIDGE2 already exists in /etc/network/interfaces"
-                if ! (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-                    --title "BRIDGE EXISTS" \
-                    --yesno "Bridge $BRIDGE2 already exists. Overwrite configuration?" \
-                    10 60 --yes-button "Overwrite" --no-button "Skip"); then
-                    msg_info "Skipping $BRIDGE2 configuration"
+
+            # WAN bridge (only if dual-interface mode)
+            if [ -n "${BRIDGE2:-}" ]; then
+                BRIDGE_PORT_WAN=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                    --inputbox "Enter bridge-ports for $BRIDGE2 (WAN)" 8 60 --title "BRIDGE-PORTS (WAN)" \
+                    --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
+
+                if grep -q "^iface $BRIDGE2" /etc/network/interfaces; then
+                    msg_warn "Bridge $BRIDGE2 already exists in /etc/network/interfaces"
+                    if ! (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                        --title "BRIDGE EXISTS" \
+                        --yesno "Bridge $BRIDGE2 already exists. Overwrite configuration?" \
+                        10 60 --yes-button "Overwrite" --no-button "Skip"); then
+                        msg_info "Skipping $BRIDGE2 configuration"
+                    else
+                        sed -i "/^auto $BRIDGE2/,/^$/d" /etc/network/interfaces
+                        echo -e "\nauto $BRIDGE2\niface $BRIDGE2 inet manual\n\tbridge-ports $BRIDGE_PORT_WAN\n\tbridge-stp off\n\tbridge-fd 0" >> /etc/network/interfaces
+                        msg_ok "Updated $BRIDGE2 configuration"
+                    fi
                 else
-                    sed -i "/^auto $BRIDGE2/,/^$/d" /etc/network/interfaces
-                    echo -e "\nauto $BRIDGE2\niface $BRIDGE2 inet manual\n\tbridge-ports $BRIDGE_PORT_LAN\n\tbridge-stp off\n\tbridge-fd 0" >> /etc/network/interfaces
-                    msg_ok "Updated $BRIDGE2 configuration"
+                    echo -e "\nauto $BRIDGE2\niface $BRIDGE2 inet manual\n\tbridge-ports $BRIDGE_PORT_WAN\n\tbridge-stp off\n\tbridge-fd 0" >> /etc/network/interfaces
+                    msg_ok "Added $BRIDGE2 configuration"
                 fi
-            else
-                echo -e "\nauto $BRIDGE2\niface $BRIDGE2 inet manual\n\tbridge-ports $BRIDGE_PORT_LAN\n\tbridge-stp off\n\tbridge-fd 0" >> /etc/network/interfaces
-                msg_ok "Added $BRIDGE2 configuration"
             fi
 
-            # For MGMT, we'll handle a static IP
-            MGMT_IP=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-                --inputbox "Enter static IP address for $BRIDGE3 (MGMT)" 8 60 --title "MGMT IP (MGMT)" \
-                --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
+            # MGMT bridge (only if configured)
+            if [ -n "${BRIDGE3:-}" ]; then
+                BRIDGE_PORT_MGMT=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                    --inputbox "Enter bridge-ports for $BRIDGE3 (MGMT)" 8 60 --title "BRIDGE-PORTS (MGMT)" \
+                    --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
 
-            MGMT_GW=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-                --inputbox "Enter gateway for $BRIDGE3 (MGMT)" 8 60 --title "MGMT GATEWAY (MGMT)" \
-                --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
+                MGMT_IP=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                    --inputbox "Enter static IP address for $BRIDGE3 (MGMT)" 8 60 --title "MGMT IP (MGMT)" \
+                    --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
 
-            MGMT_SUBNET=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-                --inputbox "Enter subnet mask for $BRIDGE3 (MGMT) (CIDR format, e.g., 24)" 8 60 "24" \
-                --title "MGMT SUBNET (MGMT)" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
+                MGMT_GW=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                    --inputbox "Enter gateway for $BRIDGE3 (MGMT)" 8 60 --title "MGMT GATEWAY (MGMT)" \
+                    --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
 
-            if grep -q "^iface $BRIDGE3" /etc/network/interfaces; then
-                msg_warn "Bridge $BRIDGE3 already exists in /etc/network/interfaces"
-                if ! (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-                    --title "BRIDGE EXISTS" \
-                    --yesno "Bridge $BRIDGE3 already exists. Overwrite configuration?" \
-                    10 60 --yes-button "Overwrite" --no-button "Skip"); then
-                    msg_info "Skipping $BRIDGE3 configuration"
+                MGMT_SUBNET=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                    --inputbox "Enter subnet mask for $BRIDGE3 (MGMT) (CIDR format, e.g., 24)" 8 60 "24" \
+                    --title "MGMT SUBNET (MGMT)" --cancel-button "Exit Script" 3>&1 1>&2 2>&3) || exit_script
+
+                if grep -q "^iface $BRIDGE3" /etc/network/interfaces; then
+                    msg_warn "Bridge $BRIDGE3 already exists in /etc/network/interfaces"
+                    if ! (whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                        --title "BRIDGE EXISTS" \
+                        --yesno "Bridge $BRIDGE3 already exists. Overwrite configuration?" \
+                        10 60 --yes-button "Overwrite" --no-button "Skip"); then
+                        msg_info "Skipping $BRIDGE3 configuration"
+                    else
+                        sed -i "/^auto $BRIDGE3/,/^$/d" /etc/network/interfaces
+                        echo -e "\nauto $BRIDGE3\niface $BRIDGE3 inet static\n\taddress $MGMT_IP/$MGMT_SUBNET\n\tgateway $MGMT_GW\n\tbridge-ports $BRIDGE_PORT_MGMT\n\tbridge-stp off\n\tbridge-fd 0" >> /etc/network/interfaces
+                        msg_ok "Updated $BRIDGE3 configuration"
+                    fi
                 else
-                    sed -i "/^auto $BRIDGE3/,/^$/d" /etc/network/interfaces
                     echo -e "\nauto $BRIDGE3\niface $BRIDGE3 inet static\n\taddress $MGMT_IP/$MGMT_SUBNET\n\tgateway $MGMT_GW\n\tbridge-ports $BRIDGE_PORT_MGMT\n\tbridge-stp off\n\tbridge-fd 0" >> /etc/network/interfaces
-                    msg_ok "Updated $BRIDGE3 configuration"
+                    msg_ok "Added $BRIDGE3 configuration"
                 fi
-            else
-                echo -e "\nauto $BRIDGE3\niface $BRIDGE3 inet static\n\taddress $MGMT_IP/$MGMT_SUBNET\n\tgateway $MGMT_GW\n\tbridge-ports $BRIDGE_PORT_MGMT\n\tbridge-stp off\n\tbridge-fd 0" >> /etc/network/interfaces
-                msg_ok "Added $BRIDGE3 configuration"
             fi
 
             msg_ok "Interfaces added to /etc/network/interfaces"
@@ -2374,9 +2639,13 @@ msg_ok "Selected [$ISO_STORAGE] for ISO and [$VM_STORAGE] for VM Disks"
 
 # Verify bridges exist if managing interfaces
 if [ "$MANAGE_INTERFACES" = "yes" ]; then
-    verify_bridge_exists "$BRIDGE1" "WAN"
-    verify_bridge_exists "$BRIDGE2" "LAN"
-    verify_bridge_exists "$BRIDGE3" "MGMT"
+    verify_bridge_exists "$BRIDGE1" "LAN"
+    if [ -n "${BRIDGE2:-}" ]; then
+        verify_bridge_exists "$BRIDGE2" "WAN"
+    fi
+    if [ -n "${BRIDGE3:-}" ]; then
+        verify_bridge_exists "$BRIDGE3" "MGMT"
+    fi
 fi
 
 # Handle installation media based on method
@@ -2428,19 +2697,21 @@ msg_ok "Completed Successfully!"
 echo
 
 # Display access information
-if [ -n "$LAN_IPV4" ]; then
+if [ -n "${IP_ADDR:-${LAN_IPV4:-}}" ]; then
+    local_ip="${IP_ADDR:-${LAN_IPV4:-}}"
     echo -e "${INFO} ${BL}Access Information:${CL}"
     echo -e "${TAB}${YL}Web Interface:${CL}"
-    if [ "$ENABLE_HTTPS" = "y" ]; then
-        echo -e "${TAB}  ${GN}https://${LAN_IPV4}/${CL}"
+    if [ "${ENABLE_HTTPS:-}" = "y" ]; then
+        echo -e "${TAB}  ${GN}https://${local_ip}/${CL}"
     else
-        echo -e "${TAB}  ${GN}http://${LAN_IPV4}/${CL}"
+        echo -e "${TAB}  ${GN}http://${local_ip}/${CL}"
     fi
     echo -e "${TAB}${YL}Username:${CL} ${GN}root${CL}"
     echo -e "${TAB}${YL}Password:${CL} ${GN}[your configured password]${CL}"
 else
     echo -e "${INFO} ${YL}The OPNsense VM has been created.${CL}"
-    echo -e "${TAB}You'll need to discover the IP address to access the WebUI."
+    echo -e "${INFO} ${YL}LAN IP was DHCP.${CL}"
+    echo -e "${TAB}${INFO} ${BGN}To find the IP login to the VM shell${CL}"
     echo -e "${TAB}${YL}Default username:${CL} ${GN}root${CL}"
     echo -e "${TAB}${YL}Default password:${CL} ${GN}opnsense${CL} (if not changed during setup)"
 fi
@@ -2460,12 +2731,16 @@ fi
 if [ "$MANAGE_INTERFACES" = "yes" ]; then
     echo
     echo -e "${INFO} ${BL}Network Configuration:${CL}"
-    echo -e "${TAB}${YL}WAN:${CL} Bridge ${GN}$BRIDGE1${CL} (MAC: ${GN}$MAC1${CL})"
+    echo -e "${TAB}${YL}LAN:${CL} Bridge ${GN}$BRIDGE1${CL} (MAC: ${GN}$MAC1${CL})"
     if [ -n "${VLAN1:-}" ]; then echo -e "${TAB}      VLAN: ${GN}$VLAN1${CL}"; fi
-    echo -e "${TAB}${YL}LAN:${CL} Bridge ${GN}$BRIDGE2${CL} (MAC: ${GN}$MAC2${CL})"
-    if [ -n "${VLAN2:-}" ]; then echo -e "${TAB}      VLAN: ${GN}$VLAN2${CL}"; fi
-    echo -e "${TAB}${YL}MGMT:${CL} Bridge ${GN}$BRIDGE3${CL} (MAC: ${GN}$MAC3${CL})"
-    if [ -n "${VLAN3:-}" ]; then echo -e "${TAB}      VLAN: ${GN}$VLAN3${CL}"; fi
+    if [ -n "${BRIDGE2:-}" ]; then
+        echo -e "${TAB}${YL}WAN:${CL} Bridge ${GN}$BRIDGE2${CL} (MAC: ${GN}$MAC2${CL})"
+        if [ -n "${VLAN2:-}" ]; then echo -e "${TAB}      VLAN: ${GN}$VLAN2${CL}"; fi
+    fi
+    if [ -n "${BRIDGE3:-}" ]; then
+        echo -e "${TAB}${YL}MGMT:${CL} Bridge ${GN}$BRIDGE3${CL} (MAC: ${GN}$MAC3${CL})"
+        if [ -n "${VLAN3:-}" ]; then echo -e "${TAB}      VLAN: ${GN}$VLAN3${CL}"; fi
+    fi
 fi
 
 echo
