@@ -650,20 +650,35 @@ cmd_init_topology() {
         python3 - "$path" <<'PY'
 import json, sys
 ex = {
-    "primary": {"vmid": 101, "name": "opnsense-primary", "node": "pve1", "real_ip_suffix": 251},
+    "_comment": "OPNsense CARP HA topology. Documentation-only IPs (RFC 5737/3849). Replace with your real values, then add as many interface entries as you need.",
+    "primary":   {"vmid": 101, "name": "opnsense-primary",   "node": "pve1", "real_ip_suffix": 251},
     "secondary": {"vmid": 102, "name": "opnsense-secondary", "node": "pve1", "storage": "local-lvm",
                   "cores": 4, "ram_mb": 8192, "disk_gb": 30, "real_ip_suffix": 252, "onboot": 0},
-    "bridges": {"prep_bridge": "vmbr-prep", "sync_bridge": "vmbr-sync"},
+    "bridges":   {"prep_bridge": "vmbr-prep", "sync_bridge": "vmbr-sync"},
     "interfaces": [
-      {"iface_tag": "wan", "descr": "WAN", "bridge": "vmbr0", "vlan_tag": None,
-       "primary_current_ip": "203.0.113.1", "prefix": 30, "primary_gateway": "203.0.113.2",
-       "vhid": 20, "role": "wan", "defer_carp": True},
-      {"iface_tag": "lan", "descr": "LAN", "bridge": "vmbr0", "vlan_tag": None,
-       "primary_current_ip": "192.0.2.1", "prefix": 24, "vhid": 1, "role": "lan"}
-      # Add more interfaces (opt1, opt2, ...) with your own
-      # vlan_tag, bridge, primary_current_ip, vhid, and role="lan".
+        # WAN: untagged uplink; defer_carp=True on a /30 (no room for a VIP).
+        {"iface_tag": "wan",  "descr": "WAN",             "bridge": "vmbr0", "vlan_tag": None,
+         "primary_current_ip": "203.0.113.1", "prefix": 30, "primary_gateway": "203.0.113.2",
+         "vhid": 20, "role": "wan", "defer_carp": True},
+        # LAN: untagged, shares the uplink bridge.
+        {"iface_tag": "lan",  "descr": "LAN",             "bridge": "vmbr0", "vlan_tag": None,
+         "primary_current_ip": "192.0.2.1",   "prefix": 24,
+         "vhid": 1,  "role": "lan"},
+        # OPT1: a VLAN-tagged segment. Copy and adjust for every VLAN.
+        {"iface_tag": "opt1", "descr": "EXAMPLE_VLAN_10", "bridge": "vmbr0", "vlan_tag": 10,
+         "primary_current_ip": "192.0.2.129", "prefix": 25,
+         "vhid": 10, "role": "lan"},
+        # OPT2: a different bridge AND IPv6 CARP. 'ipv6' block is optional.
+        {"iface_tag": "opt2", "descr": "EXAMPLE_MGMT",    "bridge": "vmbr1", "vlan_tag": None,
+         "primary_current_ip": "192.0.2.193", "prefix": 26,
+         "vhid": 2,  "role": "lan",
+         "ipv6": {"primary_current_ip": "2001:db8:1::1", "secondary_ip": "2001:db8:1::3",
+                  "carp_vip":           "2001:db8:1::1", "prefix": 64, "vhid": 2}}
+        # Add more interfaces (opt3, opt4, ...) here by copying any block above
+        # and adjusting iface_tag, descr, bridge, vlan_tag, primary_current_ip,
+        # prefix, and vhid. Every VHID must be unique per segment.
     ],
-    "sync_link": {"opt_tag": "opt2", "descr": "HA-SYNC", "guest_if": "vtnet2",
+    "sync_link": {"opt_tag": "opt3", "descr": "HA-SYNC", "guest_if": "vtnet3",
                   "subnet": "198.51.100.0/24", "primary_ip": "198.51.100.251",
                   "secondary_ip": "198.51.100.252", "prefix": 24},
     "carp": {"password": "CHANGE-ME-set-a-strong-carp-password",
@@ -672,7 +687,7 @@ ex = {
     "prep_access": {"host_bridge_ip_cidr": "198.51.100.1/24",
                     "guest_alias_ip_cidr": "198.51.100.2/24",
                     "guest_alias_iface": "vtnet1"}
-  }
+}
 open(sys.argv[1], "w").write(json.dumps(ex, indent=2) + "\n")
 print("wrote " + sys.argv[1])
 PY

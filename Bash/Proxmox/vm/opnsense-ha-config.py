@@ -56,105 +56,136 @@ def _xe(s):
 # =============================================================================
 
 EXAMPLE_TOPOLOGY = {
-      "_comment_1": "Topology config for an OPNsense CARP HA pair. Add as many interfaces as you need.",
-      "_comment_2": "All addresses below are documentation-only placeholders (RFC 5737 / RFC 3849).",
-      "_comment_3": "Replace every IP, VMID, bridge name, VHID and VLAN tag with your real values.",
-  
-      "primary": {
-          "vmid": 101,
-          "name": "opnsense-primary",
-          "node": "pve1",
-          "real_ip_suffix": 251,
-          "_comment": "final octet for primary's real IP after activation (e.g. 251 or 2)"
-      },
-  
-      "secondary": {
-          "vmid": 102,
-          "name": "opnsense-secondary",
-          "node": "pve1",
-          "storage": "local-lvm",
-          "cores": 4,
-          "ram_mb": 8192,
-          "disk_gb": 30,
-          "real_ip_suffix": 252,
-          "onboot": 0
-      },
-  
-      "bridges": {
-          "prep_bridge": "vmbr-prep",
-          "_prep_comment": "isolated bridge, no uplink, holds secondary's LAN-facing NICs during prep",
-          "sync_bridge": "vmbr-sync",
-          "_sync_comment": "isolated bridge, no uplink, dedicated pfsync/CARP-sync link between the two VMs"
-      },
-  
-      "interfaces": [
-          {
-              "iface_tag": "wan",
-              "descr": "WAN",
-              "bridge": "vmbr0",
-              "vlan_tag": None,
-              "primary_current_ip": "203.0.113.1",
-              "prefix": 30,
-              "primary_gateway": "203.0.113.2",
-              "vhid": 20,
-              "role": "wan",
-              "defer_carp": True,
-              "_defer_comment": "set true when ISP block is /30 (no room for a CARP VIP)"
-          },
-          {
-              "iface_tag": "lan",
-              "descr": "LAN",
-              "bridge": "vmbr0",
-              "vlan_tag": None,
-              "primary_current_ip": "192.0.2.1",
-              "prefix": 24,
-              "vhid": 1,
-              "role": "lan",
-              "_ipv6_example": {
-                  "_comment": "Uncomment and move this block up one level (as 'ipv6') to enable IPv6 CARP on this iface. Use documentation-only 2001:db8::/32 addresses below as guidance.",
-                  "primary_current_ip": "2001:db8::1",
-                  "secondary_ip": "2001:db8::3",
-                  "carp_vip": "2001:db8::1",
-                  "prefix": 64,
-                  "vhid": 2
-              }
-          }
-          # Add more interfaces (opt1, opt2, ...) with your own
-          # vlan_tag, bridge, primary_current_ip, vhid, and role="lan".
-      ],
-  
-      "sync_link": {
-          "opt_tag": "opt2",
-          "descr": "HA-SYNC",
-          "guest_if": "vtnet2",
-          "subnet": "198.51.100.0/24",
-          "primary_ip": "198.51.100.251",
-          "secondary_ip": "198.51.100.252",
-          "prefix": 24
-      },
-  
-      "carp": {
-          "password": "CHANGE-ME-set-a-strong-carp-password",
-          "_password_comment": "MUST be replaced. Identical on both firewalls per VHID; one password for all VIPs is fine.",
-          "primary_advskew": 0,
-          "secondary_advskew": 100,
-          "advbase": 1,
-          "preempt": True
-      },
-  
-      "disable_on_secondary": [
-          "dhcpd",
-          "dhcpdv6",
-          "unbound"
-      ],
-  
-      "prep_access": {
-          "_comment": "temporary host<->guest link during prep; pick a subnet unused elsewhere",
-          "host_bridge_ip_cidr": "198.51.100.1/24",
-          "guest_alias_ip_cidr": "198.51.100.2/24",
-          "guest_alias_iface": "vtnet1"
-      }
-  }
+    "_comment_1": "OPNsense CARP HA topology. Add as many interfaces as you need — copy any of the example entries below.",
+    "_comment_2": "All addresses are documentation-only placeholders (RFC 5737 / RFC 3849). Replace every value with your real network.",
+    "_comment_3": "Each interface needs: iface_tag, descr, bridge, vlan_tag (or None), primary_current_ip, prefix, vhid, role. Add an 'ipv6' block for IPv6 CARP.",
+
+    "primary": {
+        "vmid": 101,
+        "name": "opnsense-primary",
+        "node": "pve1",
+        "real_ip_suffix": 251,
+        "_comment": "final octet for primary's real IP after activation (e.g. 251 or 2)"
+    },
+
+    "secondary": {
+        "vmid": 102,
+        "name": "opnsense-secondary",
+        "node": "pve1",
+        "storage": "local-lvm",
+        "cores": 4,
+        "ram_mb": 8192,
+        "disk_gb": 30,
+        "real_ip_suffix": 252,
+        "onboot": 0
+    },
+
+    "bridges": {
+        "prep_bridge": "vmbr-prep",
+        "_prep_comment": "isolated bridge, no uplink, holds secondary's LAN-facing NICs during prep",
+        "sync_bridge": "vmbr-sync",
+        "_sync_comment": "isolated bridge, no uplink, dedicated pfsync/CARP-sync link between the two VMs"
+    },
+
+    "interfaces": [
+        # --- WAN: untagged, on the uplink bridge. Use defer_carp=True on a /30. -----
+        {
+            "iface_tag": "wan",
+            "descr": "WAN",
+            "bridge": "vmbr0",
+            "vlan_tag": None,
+            "primary_current_ip": "203.0.113.1",
+            "prefix": 30,
+            "primary_gateway": "203.0.113.2",
+            "vhid": 20,
+            "role": "wan",
+            "defer_carp": True,
+            "_defer_comment": "set true when ISP block is /30 — no room for a CARP VIP until a larger block is delivered"
+        },
+
+        # --- LAN: untagged, shares the uplink bridge. CARP VIP = the gateway clients already use. -----
+        {
+            "iface_tag": "lan",
+            "descr": "LAN",
+            "bridge": "vmbr0",
+            "vlan_tag": None,
+            "primary_current_ip": "192.0.2.1",
+            "prefix": 24,
+            "vhid": 1,
+            "role": "lan"
+        },
+
+        # --- OPT1: a VLAN-tagged interface (e.g. guest/IoT/printers). Copy this block --
+        # --- for every VLAN, changing iface_tag, descr, vlan_tag, IP, and vhid. --------
+        {
+            "iface_tag": "opt1",
+            "descr": "EXAMPLE_VLAN_10",
+            "bridge": "vmbr0",
+            "vlan_tag": 10,
+            "primary_current_ip": "192.0.2.129",
+            "prefix": 25,
+            "vhid": 10,
+            "role": "lan"
+        },
+
+        # --- OPT2: a different physical bridge AND IPv6 CARP. The 'ipv6' block ---------
+        # --- is optional; include it only on interfaces that run IPv6. -----------------
+        {
+            "iface_tag": "opt2",
+            "descr": "EXAMPLE_MGMT",
+            "bridge": "vmbr1",
+            "vlan_tag": None,
+            "primary_current_ip": "192.0.2.193",
+            "prefix": 26,
+            "vhid": 2,
+            "role": "lan",
+            "ipv6": {
+                "_comment": "Per-interface IPv6 CARP. carp_vip is what clients use as gateway; secondary_ip is the backup firewall's real address on this segment.",
+                "primary_current_ip": "2001:db8:1::1",
+                "secondary_ip":       "2001:db8:1::3",
+                "carp_vip":           "2001:db8:1::1",
+                "prefix": 64,
+                "vhid": 2
+            }
+        }
+
+        # Add more interfaces here (opt3, opt4, ...) by copying one of the blocks
+        # above and adjusting iface_tag, descr, bridge, vlan_tag, primary_current_ip,
+        # prefix, and vhid. Every VHID must be unique per physical/VLAN segment.
+    ],
+
+    "sync_link": {
+        "opt_tag": "opt3",
+        "descr": "HA-SYNC",
+        "guest_if": "vtnet3",
+        "subnet": "198.51.100.0/24",
+        "primary_ip": "198.51.100.251",
+        "secondary_ip": "198.51.100.252",
+        "prefix": 24
+    },
+
+    "carp": {
+        "password": "CHANGE-ME-set-a-strong-carp-password",
+        "_password_comment": "MUST be replaced. Identical on both firewalls per VHID; one password for all VIPs is fine.",
+        "primary_advskew": 0,
+        "secondary_advskew": 100,
+        "advbase": 1,
+        "preempt": True
+    },
+
+    "disable_on_secondary": [
+        "dhcpd",
+        "dhcpdv6",
+        "unbound"
+    ],
+
+    "prep_access": {
+        "_comment": "temporary host<->guest link during prep; pick a subnet unused elsewhere",
+        "host_bridge_ip_cidr": "198.51.100.1/24",
+        "guest_alias_ip_cidr": "198.51.100.2/24",
+        "guest_alias_iface": "vtnet1"
+    }
+}
 
 
 # =============================================================================
