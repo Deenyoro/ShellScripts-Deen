@@ -2,17 +2,19 @@
 # Purpose: Automate the creation of an OPNsense VM in Proxmox VE
 # Dependencies: wget, curl, whiptail, bunzip2, genisoimage, Proxmox CLI tools (qm, pvesm, pvesh)
 
-set -euo pipefail
+set -Eeuo pipefail
 
 #################################################################################
 # Configuration Settings                                                         #
 #################################################################################
 
-# Mirror and fallback settings
+# Mirror and fallback settings (OPNsense current stable: 26.1)
 MIRROR_BASE_URL="https://mirrors.ocf.berkeley.edu/opnsense/releases/"
-FALLBACK_URL="https://pkg.opnsense.org/releases/25.7/OPNsense-25.7-dvd-amd64.iso.bz2"
-FALLBACK_RELEASE_DATE="2025-Jul-15"
-FALLBACK_VERSION="25.7"
+FALLBACK_URL="https://pkg.opnsense.org/releases/26.1/OPNsense-26.1-dvd-amd64.iso.bz2"
+FALLBACK_RELEASE_DATE="2026-Jan-29"
+FALLBACK_VERSION="26.1"
+# Bootstrap release tag used by opnsense-bootstrap.sh.in -r <ver>
+BOOTSTRAP_RELEASE="${FALLBACK_VERSION}"
 
 # VM ID range
 STARTING_VM_ID=100
@@ -27,6 +29,7 @@ DEFAULT_MGMT_BRIDGE="vmbr2"
 INSTALLATION_METHOD="iso"  # iso or freebsd
 # FreeBSD URL will be discovered dynamically; this is a fallback
 FREEBSD_URL="https://download.freebsd.org/releases/VM-IMAGES/14.2-RELEASE/amd64/Latest/FreeBSD-14.2-RELEASE-amd64.qcow2.xz"
+FREEBSD_VER=""  # populated by discovery
 
 #################################################################################
 # ASCII Art and Visual Elements                                                  #
@@ -213,6 +216,9 @@ function cleanup() {
 
 trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
 trap cleanup EXIT
+trap 'exit 130' SIGINT
+trap 'exit 143' SIGTERM
+trap 'exit 129' SIGHUP
 
 #################################################################################
 # System and Environment Checks                                                  #
@@ -354,7 +360,11 @@ function check_vmid {
 }
 
 function generate_mac() {
-    echo "02:$(openssl rand -hex 5 | sed 's/\(..\)/\1:/g; s/.$//')"
+    echo "02:$(openssl rand -hex 5 | awk '{print toupper($0)}' | sed 's/\(..\)/\1:/g; s/.$//')"
+}
+
+function get_available_bridges() {
+    ip -o link show type bridge 2>/dev/null | awk -F': ' '{print $2}' | sort
 }
 
 function check_root() {
@@ -606,7 +616,20 @@ function default_settings() {
     echo -e "${DGN}Allocated RAM: ${BGN}${RAM_SIZE}${CL}"
 
     if [ "$MANAGE_INTERFACES" = "yes" ]; then
-        BRIDGE1="$DEFAULT_WAN_BRIDGE"
+        # Discover live bridges on the host so defaults match reality
+        local AVAILABLE_BRIDGES BRIDGE_COUNT FIRST_BRG SECOND_BRG THIRD_BRG
+        AVAILABLE_BRIDGES="$(get_available_bridges)"
+        BRIDGE_COUNT=$(echo "$AVAILABLE_BRIDGES" | grep -c . || true)
+        FIRST_BRG="$(echo "$AVAILABLE_BRIDGES" | sed -n '1p')"
+        SECOND_BRG="$(echo "$AVAILABLE_BRIDGES" | sed -n '2p')"
+        THIRD_BRG="$(echo "$AVAILABLE_BRIDGES" | sed -n '3p')"
+
+        # Prefer configured defaults if they actually exist, else fall back to discovered
+        if ip link show "$DEFAULT_WAN_BRIDGE" &>/dev/null; then
+            BRIDGE1="$DEFAULT_WAN_BRIDGE"
+        else
+            BRIDGE1="${FIRST_BRG:-$DEFAULT_WAN_BRIDGE}"
+        fi
         MAC1=$(generate_mac)
         MTU1="1500"
         VLAN1=""
@@ -618,16 +641,32 @@ function default_settings() {
         fi
         echo -e "${DGN}Using LAN MAC Address: ${BGN}${MAC1}${CL}"
 
+        # Only offer dual mode if we actually have a second bridge
+        local DUAL_DEFAULT="OFF" SINGLE_DEFAULT="ON"
+        if [ "$BRIDGE_COUNT" -ge 2 ]; then
+            DUAL_DEFAULT="ON"
+            SINGLE_DEFAULT="OFF"
+        fi
+
         # Network mode selection: dual (firewall/router) or single (proxy/VPN/IDS)
         if NETWORK_MODE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
             --title "NETWORK CONFIGURATION" --radiolist --cancel-button "Exit Script" \
             "Choose network setup mode for OPNsense:\n" 14 70 2 \
-            "dual" "Dual Interface (Traditional Firewall/Router)" ON \
-            "single" "Single Interface (Proxy/VPN/IDS Server)" OFF \
+            "dual" "Dual Interface (Traditional Firewall/Router)" $DUAL_DEFAULT \
+            "single" "Single Interface (Proxy/VPN/IDS Server)" $SINGLE_DEFAULT \
             3>&1 1>&2 2>&3); then
             if [ "$NETWORK_MODE" = "dual" ]; then
                 echo -e "${DGN}Network Mode: ${BGN}Dual Interface (Firewall)${CL}"
-                BRIDGE2="$DEFAULT_LAN_BRIDGE"
+                # Pick a WAN bridge that isn't the LAN bridge
+                if [ "$SECOND_BRG" = "$BRIDGE1" ] || [ -z "$SECOND_BRG" ]; then
+                    BRIDGE2="${THIRD_BRG:-$DEFAULT_LAN_BRIDGE}"
+                else
+                    BRIDGE2="${SECOND_BRG:-$DEFAULT_LAN_BRIDGE}"
+                fi
+                # If discovered WAN collides with LAN, fall back to configured default
+                if [ "$BRIDGE2" = "$BRIDGE1" ]; then
+                    BRIDGE2="$DEFAULT_LAN_BRIDGE"
+                fi
                 MAC2=$(generate_mac)
                 MTU2="1500"
                 VLAN2=""
@@ -745,24 +784,49 @@ function advanced_settings() {
         if [ -z "$VM_NAME" ]; then
             HN="opnsense"
         else
-            HN=$(echo "${VM_NAME,,}" | tr -d ' ')
+            # Lowercase, replace runs of non-[a-z0-9-] with a single dash, trim edges
+            HN=$(echo "${VM_NAME,,}" | tr -cs 'a-z0-9-' '-' | sed 's/^-//;s/-$//')
+            if [ -z "$HN" ]; then
+                HN="opnsense"
+            fi
+            if [ "$HN" != "${VM_NAME,,}" ]; then
+                whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+                    --title "HOSTNAME ADJUSTED" \
+                    --msgbox "Invalid characters detected. Hostname has been adjusted to:\n\n  $HN" 10 58
+            fi
         fi
         echo -e "${DGN}Using Hostname: ${BGN}$HN${CL}"
     else
         exit_script
     fi
 
-    CORE_COUNT=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --inputbox "Allocate CPU Cores" 8 58 4 \
-        --title "CORE COUNT" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
-    if [ -z "$CORE_COUNT" ]; then CORE_COUNT="4"; fi
-    echo -e "${DGN}Allocated Cores: ${BGN}$CORE_COUNT${CL}"
+    while true; do
+        CORE_COUNT=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+            --inputbox "Allocate CPU Cores" 8 58 4 \
+            --title "CORE COUNT" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+        [ -z "$CORE_COUNT" ] && CORE_COUNT="4"
+        if [[ "$CORE_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+            echo -e "${DGN}Allocated Cores: ${BGN}$CORE_COUNT${CL}"
+            break
+        fi
+        whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+            --title "INVALID INPUT" \
+            --msgbox "CPU Cores must be a positive integer (e.g., 4)." 8 58
+    done
 
-    RAM_SIZE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
-        --inputbox "Allocate RAM in MiB" 8 58 8192 \
-        --title "RAM" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
-    if [ -z "$RAM_SIZE" ]; then RAM_SIZE="8192"; fi
-    echo -e "${DGN}Allocated RAM: ${BGN}$RAM_SIZE${CL}"
+    while true; do
+        RAM_SIZE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+            --inputbox "Allocate RAM in MiB" 8 58 8192 \
+            --title "RAM" --cancel-button "Exit Script" 3>&1 1>&2 2<&3) || exit_script
+        [ -z "$RAM_SIZE" ] && RAM_SIZE="8192"
+        if [[ "$RAM_SIZE" =~ ^[1-9][0-9]*$ ]]; then
+            echo -e "${DGN}Allocated RAM: ${BGN}$RAM_SIZE${CL}"
+            break
+        fi
+        whiptail --backtitle "Proxmox VE OPNsense Install Script" \
+            --title "INVALID INPUT" \
+            --msgbox "RAM Size must be a positive integer in MiB (e.g., 8192)." 8 58
+    done
 
     DISK_SIZE=$(whiptail --backtitle "Proxmox VE OPNsense Install Script" \
         --inputbox "Disk size (Default: 30G)" 8 60 "30G" \
@@ -1342,16 +1406,15 @@ function handle_freebsd_download() {
     # Dynamically discover the latest stable FreeBSD amd64 qcow2 VM image
     msg_info "Retrieving the URL for the FreeBSD Qcow2 Disk Image"
     local RELEASE_LIST
-    RELEASE_LIST="$(curl -s https://download.freebsd.org/releases/VM-IMAGES/ |
+    RELEASE_LIST="$(curl -s --max-time 15 https://download.freebsd.org/releases/VM-IMAGES/ |
         grep -Eo '[0-9]+\.[0-9]+-RELEASE' |
         sort -Vr |
         uniq)"
 
     local DISCOVERED_URL=""
-    local FREEBSD_VER=""
     for ver in $RELEASE_LIST; do
         local candidate="https://download.freebsd.org/releases/VM-IMAGES/${ver}/amd64/Latest/FreeBSD-${ver}-amd64.qcow2.xz"
-        if curl -fsI "$candidate" >/dev/null 2>&1; then
+        if curl -fsI --max-time 10 "$candidate" >/dev/null 2>&1; then
             FREEBSD_VER="$ver"
             DISCOVERED_URL="$candidate"
             break
@@ -1812,7 +1875,7 @@ function create_vm() {
   <h2 style='font-size: 24px; margin: 20px 0;'>OPNsense VM</h2>
 
   <p><strong>Created:</strong> $CREATION_DATE</p>
-  <p><strong>Installation Method:</strong> $INSTALLATION_METHOD</p>
+  <p><strong>Installation Method:</strong> $INSTALLATION_METHOD$([ "$INSTALLATION_METHOD" = "freebsd" ] && [ -n "${FREEBSD_VER:-}" ] && echo " (FreeBSD ${FREEBSD_VER})")</p>
   <p><strong>OPNsense Version:</strong> $FALLBACK_VERSION</p>
 
   <hr style='margin: 20px 0;'>
@@ -2025,9 +2088,9 @@ function automate_freebsd_install() {
     send_line_to_vm "fetch https://raw.githubusercontent.com/opnsense/update/master/src/bootstrap/opnsense-bootstrap.sh.in"
     sleep 10
     
-    # Run the bootstrap script with recent version
+    # Run the bootstrap script with the configured release
     msg_info "Running OPNsense bootstrap (this will take 15-20 minutes)"
-    send_line_to_vm "sh ./opnsense-bootstrap.sh.in -y -f -r 25.7"
+    send_line_to_vm "sh ./opnsense-bootstrap.sh.in -y -f -r ${BOOTSTRAP_RELEASE}"
     
     # This takes a long time - inform the user with progress indicator
     msg_ok "OPNsense bootstrap started. This will take 15-20 minutes to complete."
