@@ -1,46 +1,46 @@
 #!/usr/bin/env bash
-# Purpose: Automate the creation of a Proxmox Backup Server (PBS) VM in Proxmox
-# This script will parse the official enterprise.proxmox.com ISO directory listing,
-# retrieve available PBS ISOs, allow user selection, and create a VM using that ISO.
-# 
-# Features:
-# - Automatic ISO discovery from official Proxmox repository
-# - Support for local ISO selection
-# - Advanced VM configuration options
-# - Automatic network bridge validation
-# - Smart storage selection
-# - Post-installation configuration options
+# shellcheck disable=SC2034,SC2317
+# Purpose: Automate the creation of a Proxmox Backup Server (PBS) VM in Proxmox VE
+# Parses enterprise.proxmox.com/iso/ for available PBS ISOs, verifies SHA256 against
+# the published SHA256SUMS manifest, and creates a UEFI VM ready for PBS installation.
 #
-# Dependencies: wget, curl, whiptail, Proxmox CLI tools (qm, pvesm, pvesh)
+# Usage:
+#   proxmoxbackupsrvr-vm.sh              # interactive
+#   proxmoxbackupsrvr-vm.sh --defaults   # non-interactive with sensible defaults
+#   proxmoxbackupsrvr-vm.sh --help       # show usage
+#
+# Dependencies: whiptail, wget, curl, openssl, numfmt, awk, sed,
+#               Proxmox CLI tools (qm, pvesm, pvesh, pveversion)
 
-set -euo pipefail
+set -Eeuo pipefail
 
-###############################################
-#               CONFIGURATION                 #
-###############################################
+#################################################################################
+# Configuration Settings                                                         #
+#################################################################################
 
-# ISO Configuration
-FALLBACK_URL="https://enterprise.proxmox.com/iso/proxmox-backup-server_3.4-1.iso"
-FALLBACK_VERSION="3.4-1"
-FALLBACK_DATE="20250410"  # YYYYMMDD format for fallback
-FALLBACK_FILENAME="${FALLBACK_DATE}-proxmox-backup-server_${FALLBACK_VERSION}.iso"
+# Repository and fallback (current PBS stable: 4.1-1 published 2025-11-26)
 PBS_DOWNLOAD_DIR="https://enterprise.proxmox.com/iso/"
+SHA256SUMS_URL="${PBS_DOWNLOAD_DIR}SHA256SUMS"
+FALLBACK_VERSION="4.1-1"
+FALLBACK_DATE="2025-11-26"
+FALLBACK_ISO="proxmox-backup-server_${FALLBACK_VERSION}.iso"
+FALLBACK_URL="${PBS_DOWNLOAD_DIR}${FALLBACK_ISO}"
+FALLBACK_SHA256="670f0a71ee25e00cc7839bebb3f399594f5257e49a224a91ce517460e7ab171e"
 
-# Default Network Configuration
-DEFAULT_BRIDGE="vmbr0"
-DEFAULT_MTU="1500"
-
-# VM ID Range
+# VM ID range
 STARTING_VM_ID=300
 NEXTID=$STARTING_VM_ID
 
-# PBS Default Credentials (for reference)
-DEFAULT_PBS_USER="root@pam"
-DEFAULT_PBS_PASS="proxmox"
+# Default network settings
+DEFAULT_BRIDGE="vmbr0"
+DEFAULT_MTU="1500"
 
-###############################################
-#              COLOR DEFINITIONS              #
-###############################################
+# CLI flags
+NON_INTERACTIVE="no"
+
+#################################################################################
+# Color and Message Formatting                                                   #
+#################################################################################
 
 CL="\033[m"               # Clear formatting
 GN="\033[1;92m"           # Green
@@ -49,54 +49,71 @@ YL="\033[01;33m"          # Yellow
 DGN="\033[32m"            # Dark Green
 BGN="\033[4;92m"          # Bold Green
 BL="\033[36m"             # Blue
+HA="\033[1;34m"           # Highlight
 CM="${GN}✓${CL}"          # Checkmark
 CROSS="${RD}✗${CL}"       # Cross
 WARN="${YL}!${CL}"        # Warning
-INFO="${BL}◉${CL}"        # Info
+BFR="\\r\\033[K"          # Line clear
+HOLD="-"                  # Progress indicator
+INFO="${GN}◉${CL}"        # Info indicator
+TAB="  "                  # Tab spacing
 
-###############################################
-#                 FUNCTIONS                   #
-###############################################
+function msg_info()  { echo -ne " ${HOLD} ${YL}${1}...${CL}"; }
+function msg_ok()    { echo -e "${BFR} ${CM} ${GN}$1${CL}"; }
+function msg_warn()  { echo -e "${BFR} ${WARN} ${YL}Warning:${CL} $1"; }
+function msg_error() { echo -e "${BFR} ${CROSS} ${RD}$1${CL}"; }
 
-function header_info {
+#################################################################################
+# ASCII Art                                                                      #
+#################################################################################
+
+function header_info() {
     clear
     cat <<"EOF"
- __                          __                         __         
- )_) _ _      _ _   _        )_)  _   _ ( _      _     (_ ` _    _ 
-/   ) (_) \) ) ) ) (_) \)   /__) (_( (_  )\ (_( )_)   .__) ) \) )  
-          (\           (\                      (                   
-                                                                  
-        P R O X M O X   B A C K U P   S E R V E R   V M
+  ____                                 ____             _
+ |  _ \ _ __ _____  ___ __ ___   _____| __ )  __ _  ___| | ___   _ _ __
+ | |_) | '__/ _ \ \/ / '_ ` _ \ / _ \_\ _ \ / _` |/ __| |/ / | | | '_ \
+ |  __/| | | (_) >  <| | | | | | (_) |_) | (_| | (__|   <| |_| | |_) |
+ |_|   |_|  \___/_/\_\_| |_| |_|\___(____/ \__,_|\___|_|\_\\__,_| .__/
+                                                                |_|
+          P R O X M O X   B A C K U P   S E R V E R   V M
 EOF
 }
 
-function msg_info() {
-    echo -e " ${INFO} ${YL}$1${CL}"
-}
+#################################################################################
+# Global State                                                                   #
+#################################################################################
 
-function msg_ok() {
-    echo -e " ${CM} ${GN}$1${CL}"
-}
+TEMP_DIR=""
+VMID=""
+MACHINE=""
+CPU_TYPE=""
+BRG=""
+HN=""
+DISK_CACHE=""
+ISO_STORAGE=""
+STORAGE=""
+EFI_DISK_SIZE=""
+VM_TAG=""
+MTU=""
+VLAN=""
+DISK_SIZE=""
+RAM_SIZE=""
+CORE_COUNT=""
+START_VM=""
+QEMU_AGENT=""
+BALLOON=""
+PROTECTION=""
+SERIAL_CONSOLE=""
+MAC=""
+ISO_PATH=""
+ISO_BASENAME=""
+ISO_EXPECTED_SHA=""
+ISO_ENTRIES=()
 
-function msg_error() {
-    echo -e " ${CROSS} ${RD}$1${CL}"
-}
-
-function msg_warn() {
-    echo -e " ${WARN} ${YL}$1${CL}"
-}
-
-# Progress indicator function
-function show_progress() {
-    local duration=$1
-    local message=$2
-    echo -n " ${INFO} ${YL}${message}${CL} "
-    for ((i=0; i<duration; i++)); do
-        echo -n "."
-        sleep 1
-    done
-    echo
-}
+#################################################################################
+# Error Handling and Cleanup                                                     #
+#################################################################################
 
 function error_handler() {
     local exit_code=$?
@@ -104,173 +121,28 @@ function error_handler() {
     local command="$2"
     echo -e "\n${RD}[ERROR]${CL} Line $line_number: exit code $exit_code while executing: $command\n"
     cleanup_vmid
-    exit $exit_code
+    exit "$exit_code"
+}
+
+function cleanup_vmid() {
+    if [[ -n "${VMID:-}" ]] && qm status "$VMID" &>/dev/null; then
+        local state
+        state=$(qm status "$VMID" 2>/dev/null | awk '{print $2}')
+        if [[ "$state" == "running" || "$state" == "stopped" ]]; then
+            msg_info "Cleaning up VM $VMID"
+            if [[ "$state" == "running" ]]; then
+                qm stop "$VMID" &>/dev/null || true
+            fi
+            sleep 2
+            qm destroy "$VMID" --purge 1 &>/dev/null || true
+            msg_ok "Cleaned up partially-created VM $VMID"
+        fi
+    fi
 }
 
 function cleanup() {
     if [[ -n "${TEMP_DIR:-}" && -d "$TEMP_DIR" ]]; then
         rm -rf "$TEMP_DIR"
-    fi
-}
-
-function cleanup_vmid() {
-    if [[ -n "${VMID:-}" ]] && qm status "$VMID" &>/dev/null; then
-        msg_info "Cleaning up VM $VMID"
-        qm stop "$VMID" &>/dev/null || true
-        sleep 2
-        qm destroy "$VMID" &>/dev/null || true
-    fi
-}
-
-trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
-trap cleanup EXIT
-
-###############################################
-#           DEPENDENCY CHECKING               #
-###############################################
-
-function check_dependencies() {
-    local deps=(whiptail pvesh pvesm qm wget curl openssl numfmt)
-    local missing_deps=()
-    
-    msg_info "Checking dependencies..."
-    
-    for cmd in "${deps[@]}"; do
-        if ! command -v "$cmd" &>/dev/null; then
-            missing_deps+=("$cmd")
-        fi
-    done
-    
-    if [ ${#missing_deps[@]} -ne 0 ]; then
-        msg_error "Missing required dependencies: ${missing_deps[*]}"
-        msg_info "Install with: apt-get install ${missing_deps[*]}"
-        exit 1
-    fi
-    
-    msg_ok "All dependencies satisfied"
-}
-
-###############################################
-#           SYSTEM VALIDATION                 #
-###############################################
-
-function check_root() {
-    if [[ "$(id -u)" -ne 0 ]]; then
-        clear
-        msg_error "This script must be run as root"
-        echo -e "\nPlease run: sudo $0"
-        exit 1
-    fi
-}
-
-function arch_check() {
-    local arch=$(dpkg --print-architecture)
-    if [[ "$arch" != "amd64" ]]; then
-        msg_error "This script requires amd64 architecture (current: $arch)"
-        msg_warn "PBS is not supported on ARM architectures"
-        exit 1
-    fi
-}
-
-function pve_check() {
-    local required_version="8.1"
-    local current_version
-    
-    if ! command -v pveversion &>/dev/null; then
-        msg_error "This script must be run on a Proxmox VE host"
-        exit 1
-    fi
-    
-    current_version=$(pveversion | grep -oP 'pve-manager/\K[0-9]+\.[0-9]+' || echo "0.0")
-    
-    if [[ $(printf "%s\n%s" "$required_version" "$current_version" | sort -V | head -n1) != "$required_version" ]]; then
-        msg_error "Proxmox VE version $current_version is older than required version $required_version"
-        msg_info "Please upgrade Proxmox VE before running this script"
-        exit 1
-    fi
-    
-    msg_ok "Proxmox VE version $current_version meets requirements"
-}
-
-function ssh_check() {
-    if [[ -n "${SSH_CLIENT:+x}" ]]; then
-        if ! whiptail --backtitle "Proxmox VE PBS Install Script" \
-            --defaultno \
-            --title "SSH DETECTED" \
-            --yesno "It's recommended to use the Proxmox shell instead of SSH.\n\nSSH can cause issues with interactive elements.\n\nContinue anyway?" 12 62; then
-            clear
-            exit 1
-        fi
-    fi
-}
-
-###############################################
-#           VM ID MANAGEMENT                  #
-###############################################
-
-function get_next_vmid() {
-    local try_id=$STARTING_VM_ID
-    
-    while true; do
-        # Check if ID is used by a VM
-        if [ -f "/etc/pve/qemu-server/${try_id}.conf" ]; then
-            ((try_id++))
-            continue
-        fi
-        
-        # Check if ID is used by a container
-        if [ -f "/etc/pve/lxc/${try_id}.conf" ]; then
-            ((try_id++))
-            continue
-        fi
-        
-        # Check cluster resources
-        if pvesh get /cluster/resources --type vm 2>/dev/null | grep -qw "$try_id"; then
-            ((try_id++))
-            continue
-        fi
-        
-        break
-    done
-    
-    echo "$try_id"
-}
-
-function check_vmid() {
-    NEXTID=$(get_next_vmid)
-}
-
-###############################################
-#           UTILITY FUNCTIONS                 #
-###############################################
-
-function generate_mac() {
-    echo "02:$(openssl rand -hex 5 | sed 's/\(..\)/\1:/g; s/.$//')"
-}
-
-function verify_bridge_exists() {
-    local bridge="$1"
-    
-    if ! ip link show "$bridge" &>/dev/null; then
-        msg_warn "Bridge '$bridge' does not exist"
-        
-        if whiptail --backtitle "Proxmox VE PBS Install Script" \
-            --title "BRIDGE NOT FOUND" \
-            --yesno "Bridge '$bridge' does not exist.\n\nWould you like to create it?" 10 60; then
-            
-            msg_info "Creating bridge $bridge"
-            echo -e "\nauto $bridge\niface $bridge inet manual\n\tbridge-ports none\n\tbridge-stp off\n\tbridge-fd 0" >> /etc/network/interfaces
-            
-            if systemctl restart networking; then
-                msg_ok "Bridge $bridge created successfully"
-            else
-                msg_error "Failed to create bridge. Please create it manually"
-                exit 1
-            fi
-        else
-            msg_error "Bridge '$bridge' is required. Please create it manually"
-            exit 1
-        fi
     fi
 }
 
@@ -280,762 +152,1002 @@ function exit_script() {
     exit 1
 }
 
-###############################################
-#        VM CONFIGURATION SETTINGS            #
-###############################################
+trap 'error_handler $LINENO "$BASH_COMMAND"' ERR
+trap cleanup EXIT
+trap 'exit 130' SIGINT
+trap 'exit 143' SIGTERM
+trap 'exit 129' SIGHUP
+
+#################################################################################
+# CLI / Help                                                                     #
+#################################################################################
+
+function usage() {
+    cat <<EOF
+Usage: $0 [OPTIONS]
+
+Create a Proxmox Backup Server VM in Proxmox VE with verified ISO.
+
+Options:
+  --defaults      Skip interactive prompts; use sensible defaults
+  -h, --help      Show this help message
+
+Environment:
+  NEXTID override via VMID=<id>, bridge via BRG=<name> (only with --defaults)
+
+Examples:
+  $0                     Launch interactive wizard
+  $0 --defaults          Create VM non-interactively
+EOF
+}
+
+function parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --defaults)   NON_INTERACTIVE="yes"; shift ;;
+            -h|--help)    usage; exit 0 ;;
+            *)            msg_error "Unknown argument: $1"; usage; exit 2 ;;
+        esac
+    done
+}
+
+#################################################################################
+# Dependency Checking                                                            #
+#################################################################################
+
+function check_dependencies() {
+    local deps=(whiptail pvesh pvesm qm wget curl openssl numfmt awk sed)
+    declare -A cmd_pkg_map=(
+        [whiptail]=whiptail
+        [pvesh]=pve-manager
+        [pvesm]=pve-manager
+        [qm]=pve-manager
+        [wget]=wget
+        [curl]=curl
+        [openssl]=openssl
+        [numfmt]=coreutils
+        [awk]=mawk
+        [sed]=sed
+    )
+
+    local missing_pkgs=()
+    for cmd in "${deps[@]}"; do
+        if ! command -v "$cmd" &>/dev/null; then
+            missing_pkgs+=("${cmd_pkg_map[$cmd]:-$cmd}")
+        fi
+    done
+
+    if [ ${#missing_pkgs[@]} -eq 0 ]; then
+        msg_ok "All required dependencies are installed"
+        return 0
+    fi
+
+    # Deduplicate
+    local uniq
+    mapfile -t uniq < <(printf '%s\n' "${missing_pkgs[@]}" | sort -u)
+
+    if [[ "$NON_INTERACTIVE" == "yes" ]]; then
+        msg_info "Installing missing packages: ${uniq[*]}"
+        apt-get update -qq
+        apt-get install -y "${uniq[@]}"
+        msg_ok "Dependencies installed"
+        return 0
+    fi
+
+    msg_warn "Missing packages: ${uniq[*]}"
+    local choice
+    read -rp "Install them now via apt-get? (y/n): " choice
+    case "$choice" in
+        y|Y)
+            msg_info "Updating package lists"
+            apt-get update -qq || { msg_error "apt-get update failed"; exit 1; }
+            msg_ok "Package lists updated"
+            msg_info "Installing ${uniq[*]}"
+            apt-get install -y "${uniq[@]}" || { msg_error "Install failed"; exit 1; }
+            msg_ok "Dependencies installed"
+            ;;
+        *)
+            msg_error "Required dependencies missing. Exiting."
+            exit 1
+            ;;
+    esac
+}
+
+#################################################################################
+# System Validation                                                              #
+#################################################################################
+
+function check_root() {
+    if [[ "$(id -u)" -ne 0 ]]; then
+        msg_error "This script must be run as root"
+        echo -e "\nPlease run: sudo $0"
+        exit 1
+    fi
+}
+
+function arch_check() {
+    local arch
+    arch=$(dpkg --print-architecture 2>/dev/null || uname -m)
+    if [[ "$arch" != "amd64" && "$arch" != "x86_64" ]]; then
+        msg_error "PBS is only supported on amd64 (detected: $arch)"
+        exit 1
+    fi
+}
+
+function pve_check() {
+    if ! command -v pveversion &>/dev/null; then
+        msg_error "This script must be run on a Proxmox VE host"
+        exit 1
+    fi
+
+    local pve_ver
+    pve_ver="$(pveversion | awk -F'/' '{print $2}' | awk -F'-' '{print $1}')"
+
+    if [[ "$pve_ver" =~ ^8\.([0-9]+) ]]; then
+        local minor="${BASH_REMATCH[1]}"
+        if ((minor < 1)); then
+            msg_error "Proxmox VE $pve_ver is too old (need 8.1+)"
+            exit 1
+        fi
+        msg_ok "Proxmox VE $pve_ver detected"
+        return 0
+    fi
+    if [[ "$pve_ver" =~ ^9\.([0-9]+) ]]; then
+        msg_ok "Proxmox VE $pve_ver detected"
+        return 0
+    fi
+
+    msg_error "Unsupported Proxmox VE version: $pve_ver"
+    msg_error "Supported: Proxmox VE 8.1+ or 9.x"
+    exit 1
+}
+
+function ssh_check() {
+    if [[ -n "${SSH_CLIENT:+x}" && "$NON_INTERACTIVE" != "yes" ]]; then
+        if ! whiptail --backtitle "Proxmox VE PBS Install Script" \
+            --defaultno \
+            --title "SSH DETECTED" \
+            --yesno "It's recommended to use the Proxmox shell instead of SSH.\nSSH can cause issues with interactive elements.\n\nContinue anyway?" 12 62; then
+            exit_script
+        fi
+    fi
+}
+
+#################################################################################
+# VM ID and Utility                                                              #
+#################################################################################
+
+function get_valid_nextid() {
+    local try_id
+    try_id=$(pvesh get /cluster/nextid 2>/dev/null || echo "$STARTING_VM_ID")
+    [[ "$try_id" -lt "$STARTING_VM_ID" ]] && try_id=$STARTING_VM_ID
+
+    while true; do
+        if [[ -f "/etc/pve/qemu-server/${try_id}.conf" ]]; then
+            ((try_id++)); continue
+        fi
+        if [[ -f "/etc/pve/lxc/${try_id}.conf" ]]; then
+            ((try_id++)); continue
+        fi
+        if command -v lvs &>/dev/null && \
+           lvs --noheadings -o lv_name 2>/dev/null | grep -qE "(^|[-_])${try_id}($|[-_])"; then
+            ((try_id++)); continue
+        fi
+        break
+    done
+    echo "$try_id"
+}
+
+function check_vmid() { NEXTID=$(get_valid_nextid); }
+
+function generate_mac() {
+    local hex
+    if command -v openssl &>/dev/null; then
+        hex=$(openssl rand -hex 5)
+    else
+        hex=$(head -c 5 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    fi
+    echo "02:$(echo "$hex" | sed 's/\(..\)/\1:/g; s/.$//' | tr '[:lower:]' '[:upper:]')"
+}
+
+function get_available_bridges() {
+    ip -o link show type bridge 2>/dev/null | awk -F': ' '{print $2}' | sort
+}
+
+function verify_bridge_exists() {
+    local bridge="$1"
+
+    if ip link show "$bridge" &>/dev/null; then
+        msg_ok "Bridge '$bridge' exists"
+        return 0
+    fi
+
+    msg_warn "Bridge '$bridge' does not exist"
+
+    if [[ "$NON_INTERACTIVE" == "yes" ]]; then
+        msg_error "Required bridge '$bridge' missing (non-interactive mode)"
+        exit 1
+    fi
+
+    if whiptail --backtitle "Proxmox VE PBS Install Script" \
+        --title "BRIDGE NOT FOUND" \
+        --yesno "Bridge '$bridge' does not exist.\n\nCreate it now?" 10 60; then
+        msg_info "Creating bridge $bridge"
+        printf "\nauto %s\niface %s inet manual\n\tbridge-ports none\n\tbridge-stp off\n\tbridge-fd 0\n" \
+            "$bridge" "$bridge" >> /etc/network/interfaces
+        if systemctl restart networking 2>/dev/null && ip link show "$bridge" &>/dev/null; then
+            msg_ok "Bridge $bridge created"
+        else
+            msg_warn "Bridge configured but not yet active — a reboot may be required"
+        fi
+    else
+        msg_error "Bridge '$bridge' is required. Please create it manually."
+        exit 1
+    fi
+}
+
+#################################################################################
+# VM Configuration                                                               #
+#################################################################################
 
 function default_settings() {
     check_vmid
-    VMID="$NEXTID"
+    VMID="${VMID:-$NEXTID}"
     MACHINE="q35"
     DISK_CACHE=""
     HN="PBS-VM${VMID}"
     CPU_TYPE="host"
-    CORE_COUNT="2"
-    RAM_SIZE="2048"
-    DISK_SIZE="30G"
-    BRG="$DEFAULT_BRIDGE"
+    CORE_COUNT="4"
+    RAM_SIZE="4096"
+    DISK_SIZE="32G"
+    BRG="${BRG:-$DEFAULT_BRIDGE}"
     MAC=$(generate_mac)
     VLAN=""
     MTU="$DEFAULT_MTU"
     START_VM="yes"
-    VM_TAG="backup,pbs"
-    EFI_DISK_SIZE="512M"
+    VM_TAG="backup;pbs"
+    EFI_DISK_SIZE="4M"
     SERIAL_CONSOLE="yes"
     QEMU_AGENT="yes"
     BALLOON="yes"
     PROTECTION="no"
-    
     msg_ok "Default settings applied"
 }
 
 function advanced_settings() {
     check_vmid
-    
-    # VM ID
-    VMID=$(whiptail --backtitle "Proxmox VE PBS Install Script" \
+    local bt="Proxmox VE PBS Install Script"
+
+    VMID=$(whiptail --backtitle "$bt" \
         --inputbox "Virtual Machine ID (Default: $NEXTID)" 8 60 "$NEXTID" \
-        --title "VIRTUAL MACHINE ID" --cancel-button "Exit" 3>&1 1>&2 2>&3) || exit_script
-    
-    # Validate VM ID
-    if ! [[ "$VMID" =~ ^[0-9]+$ ]]; then
-        msg_error "VM ID must be a number"
-        exit 1
-    fi
-    
-    # Hostname
-    HN=$(whiptail --backtitle "Proxmox VE PBS Install Script" \
-        --inputbox "Hostname (Default: PBS-VM$VMID)" 8 60 "PBS-VM${VMID}" \
+        --title "VM ID" --cancel-button "Exit" 3>&1 1>&2 2>&3) || exit_script
+    [[ "$VMID" =~ ^[0-9]+$ ]] || { msg_error "VM ID must be numeric"; exit 1; }
+
+    HN=$(whiptail --backtitle "$bt" \
+        --inputbox "Hostname" 8 60 "PBS-VM${VMID}" \
         --title "HOSTNAME" --cancel-button "Exit" 3>&1 1>&2 2>&3) || exit_script
-    
-    # Machine Type
-    MACHINE=$(whiptail --backtitle "Proxmox VE PBS Install Script" \
+
+    MACHINE=$(whiptail --backtitle "$bt" \
         --title "MACHINE TYPE" --radiolist "Select machine type:" 10 60 2 \
-        "q35" "Q35: Modern with PCIe support (recommended)" ON \
-        "i440fx" "i440fx: Legacy compatibility" OFF \
+        "q35"    "Q35 (modern, PCIe) [recommended]" ON \
+        "i440fx" "i440fx (legacy)" OFF \
         3>&1 1>&2 2>&3) || exit_script
-    
-    # Disk Cache
-    DISK_CACHE=$(whiptail --backtitle "Proxmox VE PBS Install Script" \
-        --title "DISK CACHE" --radiolist "Select disk cache mode:" 12 60 4 \
-        "none" "None (recommended for integrity)" ON \
-        "writeback" "Writeback (better performance)" OFF \
+
+    DISK_CACHE=$(whiptail --backtitle "$bt" \
+        --title "DISK CACHE" --radiolist "Select disk cache mode:" 14 60 5 \
+        ""             "Default / none (recommended)" ON \
+        "writeback"    "Writeback (better perf)" OFF \
         "writethrough" "Writethrough (balanced)" OFF \
-        "directsync" "Direct sync (safest)" OFF \
+        "directsync"   "Direct sync (safest)" OFF \
+        "unsafe"       "Unsafe (fastest, NOT for prod)" OFF \
         3>&1 1>&2 2>&3) || exit_script
-    
-    # CPU Type
-    CPU_TYPE=$(whiptail --backtitle "Proxmox VE PBS Install Script" \
+
+    CPU_TYPE=$(whiptail --backtitle "$bt" \
         --title "CPU MODEL" --radiolist "Select CPU model:" 12 60 4 \
-        "host" "Host (best performance)" ON \
-        "kvm64" "KVM64 (compatibility)" OFF \
-        "qemu64" "QEMU64 (maximum compatibility)" OFF \
-        "max" "Maximum features" OFF \
+        "host"   "Host (best performance)" ON \
+        "x86-64-v2-AES" "Modern baseline" OFF \
+        "kvm64"  "KVM64 (compatibility)" OFF \
+        "max"    "Maximum features" OFF \
         3>&1 1>&2 2>&3) || exit_script
-    
-    # CPU Cores
-    CORE_COUNT=$(whiptail --backtitle "Proxmox VE PBS Install Script" \
-        --inputbox "Number of CPU cores (Default: 2)" 8 60 "2" \
+
+    CORE_COUNT=$(whiptail --backtitle "$bt" \
+        --inputbox "CPU cores" 8 60 "4" \
         --title "CPU CORES" --cancel-button "Exit" 3>&1 1>&2 2>&3) || exit_script
-    
-    # RAM Size
-    RAM_SIZE=$(whiptail --backtitle "Proxmox VE PBS Install Script" \
-        --inputbox "RAM size in MiB (Default: 2048)" 8 60 "2048" \
-        --title "RAM SIZE" --cancel-button "Exit" 3>&1 1>&2 2>&3) || exit_script
-    
-    # Disk Size
-    DISK_SIZE=$(whiptail --backtitle "Proxmox VE PBS Install Script" \
-        --inputbox "Disk size (Default: 30G)" 8 60 "30G" \
+    [[ "$CORE_COUNT" =~ ^[0-9]+$ ]] || { msg_error "Cores must be numeric"; exit 1; }
+
+    RAM_SIZE=$(whiptail --backtitle "$bt" \
+        --inputbox "RAM size in MiB" 8 60 "4096" \
+        --title "RAM" --cancel-button "Exit" 3>&1 1>&2 2>&3) || exit_script
+    [[ "$RAM_SIZE" =~ ^[0-9]+$ ]] || { msg_error "RAM must be numeric"; exit 1; }
+
+    DISK_SIZE=$(whiptail --backtitle "$bt" \
+        --inputbox "OS disk size (e.g. 32G)" 8 60 "32G" \
         --title "DISK SIZE" --cancel-button "Exit" 3>&1 1>&2 2>&3) || exit_script
-    
-    # Network Bridge
-    BRG=$(whiptail --backtitle "Proxmox VE PBS Install Script" \
-        --inputbox "Network Bridge (Default: $DEFAULT_BRIDGE)" 8 60 "$DEFAULT_BRIDGE" \
-        --title "NETWORK BRIDGE" --cancel-button "Exit" 3>&1 1>&2 2>&3) || exit_script
-    
-    # MAC Address
-    MAC=$(whiptail --backtitle "Proxmox VE PBS Install Script" \
-        --inputbox "MAC Address (Auto-generated)" 8 60 "$(generate_mac)" \
-        --title "MAC ADDRESS" --cancel-button "Exit" 3>&1 1>&2 2>&3) || exit_script
-    
-    # VLAN Tag
-    VLAN=$(whiptail --backtitle "Proxmox VE PBS Install Script" \
-        --inputbox "VLAN Tag (Leave empty for none)" 8 60 "" \
-        --title "VLAN TAG" --cancel-button "Exit" 3>&1 1>&2 2>&3) || exit_script
-    
-    # MTU Size
-    MTU=$(whiptail --backtitle "Proxmox VE PBS Install Script" \
-        --inputbox "Interface MTU Size (Default: $DEFAULT_MTU)" 8 60 "$DEFAULT_MTU" \
-        --title "MTU SIZE" --cancel-button "Exit" 3>&1 1>&2 2>&3) || exit_script
-    
-    # VM Tags
-    VM_TAG=$(whiptail --backtitle "Proxmox VE PBS Install Script" \
-        --inputbox "VM Tags (comma-separated)" 8 60 "backup,pbs" \
+
+    # Offer a list of existing bridges
+    local bridges
+    mapfile -t bridges < <(get_available_bridges)
+    if ((${#bridges[@]} > 0)); then
+        local br_items=()
+        for b in "${bridges[@]}"; do
+            br_items+=("$b" "existing bridge")
+        done
+        br_items+=("__custom__" "Enter a different name")
+        BRG=$(whiptail --backtitle "$bt" --title "NETWORK BRIDGE" \
+            --menu "Select bridge (default: $DEFAULT_BRIDGE)" 18 60 10 \
+            "${br_items[@]}" 3>&1 1>&2 2>&3) || exit_script
+        if [[ "$BRG" == "__custom__" ]]; then
+            BRG=$(whiptail --backtitle "$bt" \
+                --inputbox "Bridge name" 8 60 "$DEFAULT_BRIDGE" \
+                --title "BRIDGE" --cancel-button "Exit" 3>&1 1>&2 2>&3) || exit_script
+        fi
+    else
+        BRG=$(whiptail --backtitle "$bt" \
+            --inputbox "Bridge name" 8 60 "$DEFAULT_BRIDGE" \
+            --title "BRIDGE" --cancel-button "Exit" 3>&1 1>&2 2>&3) || exit_script
+    fi
+
+    MAC=$(whiptail --backtitle "$bt" \
+        --inputbox "MAC address (auto)" 8 60 "$(generate_mac)" \
+        --title "MAC" --cancel-button "Exit" 3>&1 1>&2 2>&3) || exit_script
+
+    VLAN=$(whiptail --backtitle "$bt" \
+        --inputbox "VLAN tag (blank = none)" 8 60 "" \
+        --title "VLAN" --cancel-button "Exit" 3>&1 1>&2 2>&3) || exit_script
+
+    MTU=$(whiptail --backtitle "$bt" \
+        --inputbox "Interface MTU" 8 60 "$DEFAULT_MTU" \
+        --title "MTU" --cancel-button "Exit" 3>&1 1>&2 2>&3) || exit_script
+
+    VM_TAG=$(whiptail --backtitle "$bt" \
+        --inputbox "VM tags (semicolon-separated)" 8 60 "backup;pbs" \
         --title "VM TAGS" --cancel-button "Exit" 3>&1 1>&2 2>&3) || exit_script
-    
-    # EFI Disk Size
-    EFI_DISK_SIZE=$(whiptail --backtitle "Proxmox VE PBS Install Script" \
-        --inputbox "EFI Disk Size (Default: 512M)" 8 60 "512M" \
-        --title "EFI DISK SIZE" --cancel-button "Exit" 3>&1 1>&2 2>&3) || exit_script
-    
-    # Additional Options
-    if whiptail --backtitle "Proxmox VE PBS Install Script" \
-        --title "SERIAL CONSOLE" --yesno "Enable serial console?" 8 60; then
-        SERIAL_CONSOLE="yes"
-    else
-        SERIAL_CONSOLE="no"
-    fi
-    
-    if whiptail --backtitle "Proxmox VE PBS Install Script" \
-        --title "QEMU AGENT" --yesno "Enable QEMU Guest Agent?" 8 60; then
-        QEMU_AGENT="yes"
-    else
-        QEMU_AGENT="no"
-    fi
-    
-    if whiptail --backtitle "Proxmox VE PBS Install Script" \
-        --title "MEMORY BALLOONING" --yesno "Enable memory ballooning?" 8 60; then
-        BALLOON="yes"
-    else
-        BALLOON="no"
-    fi
-    
-    if whiptail --backtitle "Proxmox VE PBS Install Script" \
-        --title "VM PROTECTION" --yesno "Enable VM protection?" 8 60; then
-        PROTECTION="yes"
-    else
-        PROTECTION="no"
-    fi
-    
-    if whiptail --backtitle "Proxmox VE PBS Install Script" \
-        --title "START VIRTUAL MACHINE" --yesno "Start VM when completed?" 10 60; then
-        START_VM="yes"
-    else
-        START_VM="no"
-    fi
-    
+
+    EFI_DISK_SIZE=$(whiptail --backtitle "$bt" \
+        --inputbox "EFI disk size (4M is standard)" 8 60 "4M" \
+        --title "EFI DISK" --cancel-button "Exit" 3>&1 1>&2 2>&3) || exit_script
+
+    whiptail --backtitle "$bt" --title "SERIAL CONSOLE" \
+        --yesno "Enable serial console?" 8 60 && SERIAL_CONSOLE="yes" || SERIAL_CONSOLE="no"
+    whiptail --backtitle "$bt" --title "QEMU AGENT" \
+        --yesno "Enable QEMU Guest Agent?" 8 60 && QEMU_AGENT="yes" || QEMU_AGENT="no"
+    whiptail --backtitle "$bt" --title "BALLOONING" \
+        --yesno "Enable memory ballooning?" 8 60 && BALLOON="yes" || BALLOON="no"
+    whiptail --backtitle "$bt" --title "PROTECTION" \
+        --defaultno --yesno "Enable VM protection (prevent accidental destroy)?" 8 60 \
+        && PROTECTION="yes" || PROTECTION="no"
+    whiptail --backtitle "$bt" --title "START VM" \
+        --yesno "Start the VM after creation?" 8 60 && START_VM="yes" || START_VM="no"
+
     msg_ok "Advanced settings configured"
 }
 
 function start_script() {
+    if [[ "$NON_INTERACTIVE" == "yes" ]]; then
+        default_settings
+        return
+    fi
     if whiptail --backtitle "Proxmox VE PBS Install Script" \
         --title "SETTINGS" \
-        --yesno "Use Default Settings?" --defaultno 10 60; then
+        --yesno "Use default settings?\n\n(Select No to configure advanced options)" \
+        --defaultno 10 60; then
         default_settings
     else
         advanced_settings
     fi
 }
 
-###############################################
-#           ISO HANDLING                      #
-###############################################
+#################################################################################
+# ISO Handling (discovery, download, checksum)                                   #
+#################################################################################
 
 function parse_iso_listing() {
-    local html_content="$1"
-    local iso_entries=()
-    
+    local html="$1"
+    ISO_ENTRIES=()
+
+    # Walk each href="proxmox-backup-server_X.Y-Z.iso" occurrence with its date
+    # Listing lines look like:
+    # <a href="proxmox-backup-server_4.1-1.iso">proxmox-backup-server_4.1-1.iso</a>   26-Nov-2025 12:34   1.5G
     while IFS= read -r line; do
-        # Looking for lines with proxmox-backup-server_*.iso
-        if [[ "$line" =~ href=\"(proxmox-backup-server_[0-9]+\.[0-9]+-[0-9]+\.iso)\" ]]; then
-            local iso_file="${BASH_REMATCH[1]}"
-            
-            # Extract date more reliably
-            local date_part=$(echo "$line" | grep -oP '\d{2}-[A-Za-z]{3}-\d{4}' | head -1)
-            
-            if [[ -z "$date_part" ]]; then
-                date_part=$(date +"%d-%b-%Y")
-            fi
-            
-            # Parse date components
-            local dd=$(echo "$date_part" | cut -d'-' -f1)
-            local mon=$(echo "$date_part" | cut -d'-' -f2)
-            local yyyy=$(echo "$date_part" | cut -d'-' -f3)
-            
-            # Convert month to number
-            case $mon in
-                Jan) mm="01" ;;
-                Feb) mm="02" ;;
-                Mar) mm="03" ;;
-                Apr) mm="04" ;;
-                May) mm="05" ;;
-                Jun) mm="06" ;;
-                Jul) mm="07" ;;
-                Aug) mm="08" ;;
-                Sep) mm="09" ;;
-                Oct) mm="10" ;;
-                Nov) mm="11" ;;
-                Dec) mm="12" ;;
-                *) mm="01" ;;
-            esac
-            
-            local date_ymd="${yyyy}${mm}${dd}"
-            local new_filename="${date_ymd}-${iso_file}"
-            local iso_url="${PBS_DOWNLOAD_DIR}${iso_file}"
-            
-            iso_entries+=("$iso_url|$new_filename|$date_part")
-        fi
-    done < <(echo "$html_content")
-    
-    echo "${iso_entries[@]}"
+        [[ "$line" =~ href=\"(proxmox-backup-server_[0-9]+\.[0-9]+-[0-9]+\.iso)\" ]] || continue
+        local iso_file="${BASH_REMATCH[1]}"
+
+        # Extract date — DD-Mon-YYYY
+        local date_part
+        date_part=$(echo "$line" | grep -oE '[0-9]{2}-[A-Za-z]{3}-[0-9]{4}' | head -1)
+        [[ -z "$date_part" ]] && date_part="01-Jan-1970"
+
+        # Convert to YYYY-MM-DD (portable month lookup)
+        local dd mon yyyy mm
+        dd=$(echo "$date_part" | cut -d'-' -f1)
+        mon=$(echo "$date_part" | cut -d'-' -f2)
+        yyyy=$(echo "$date_part" | cut -d'-' -f3)
+        case "$mon" in
+            Jan) mm=01 ;; Feb) mm=02 ;; Mar) mm=03 ;; Apr) mm=04 ;;
+            May) mm=05 ;; Jun) mm=06 ;; Jul) mm=07 ;; Aug) mm=08 ;;
+            Sep) mm=09 ;; Oct) mm=10 ;; Nov) mm=11 ;; Dec) mm=12 ;;
+            *) mm=01 ;;
+        esac
+        local iso_date="${yyyy}-${mm}-${dd}"
+        local iso_url="${PBS_DOWNLOAD_DIR}${iso_file}"
+        ISO_ENTRIES+=("${iso_date}|${iso_file}|${iso_url}")
+    done <<< "$html"
+
+    # Sort newest first
+    if ((${#ISO_ENTRIES[@]} > 0)); then
+        mapfile -t ISO_ENTRIES < <(printf '%s\n' "${ISO_ENTRIES[@]}" | sort -r)
+    fi
+}
+
+function fetch_sha256sums() {
+    local sha_file="$1"
+    msg_info "Fetching published SHA256SUMS"
+    if curl -fsSL --connect-timeout 10 "$SHA256SUMS_URL" -o "$sha_file" 2>/dev/null; then
+        msg_ok "SHA256SUMS fetched"
+        return 0
+    fi
+    msg_warn "Could not fetch SHA256SUMS — checksum verification will be skipped"
+    return 1
+}
+
+function sha_for_iso() {
+    local iso_file="$1"
+    local sha_file="$2"
+    [[ -f "$sha_file" ]] || return 1
+    awk -v f="$iso_file" '$2==f {print $1; exit}' "$sha_file"
 }
 
 function select_iso() {
-    local menu_items=()
-    local iso_entries=()
-    
-    # Try to fetch available ISOs
     msg_info "Fetching available PBS ISOs from $PBS_DOWNLOAD_DIR"
-    
-    local html_content
-    if html_content=$(curl -s --connect-timeout 10 "$PBS_DOWNLOAD_DIR" 2>/dev/null); then
-        IFS=' ' read -ra iso_entries <<< "$(parse_iso_listing "$html_content")"
-        
-        if [ ${#iso_entries[@]} -gt 0 ]; then
-            msg_ok "Found ${#iso_entries[@]} PBS ISO(s)"
-            
-            # Sort by date (newest first)
-            IFS=$'\n' sorted_entries=($(printf '%s\n' "${iso_entries[@]}" | sort -t'|' -k1 -r))
-            
-            for entry in "${sorted_entries[@]}"; do
-                IFS='|' read -r url filename date_str <<< "$entry"
-                menu_items+=("$url" "$filename - Updated: $date_str")
-            done
-        else
-            msg_warn "No PBS ISOs found in directory listing"
-        fi
+    local html
+    if html=$(curl -fsSL --connect-timeout 10 "$PBS_DOWNLOAD_DIR" 2>/dev/null); then
+        parse_iso_listing "$html"
+        msg_ok "Discovered ${#ISO_ENTRIES[@]} PBS ISO(s) upstream"
     else
-        msg_warn "Could not fetch ISO listing from Proxmox repository"
+        msg_warn "Could not reach $PBS_DOWNLOAD_DIR — will use fallback"
     fi
-    
-    # Always add fallback
-    menu_items+=("$FALLBACK_URL" "$FALLBACK_FILENAME - Updated: ${FALLBACK_DATE} (Fallback)")
-    
-    # Select download or local
-    if whiptail --backtitle "Proxmox VE PBS Install Script" \
-        --title "ISO SELECTION" \
-        --yesno "Would you like to download a PBS ISO from the internet?\n\nChoose 'No' to select a locally available ISO." 12 70; then
-        
-        # Download ISO
-        local chosen_url
+
+    # Always guarantee fallback is present if upstream empty
+    if ((${#ISO_ENTRIES[@]} == 0)); then
+        ISO_ENTRIES+=("${FALLBACK_DATE}|${FALLBACK_ISO}|${FALLBACK_URL}")
+    fi
+
+    # Fetch SHA256SUMS once
+    local sha_file="${TEMP_DIR}/SHA256SUMS"
+    fetch_sha256sums "$sha_file" || true
+
+    # Prompt user: download or pick local?
+    local use_local="no"
+    if [[ "$NON_INTERACTIVE" == "yes" ]]; then
+        use_local="no"
+    elif ! whiptail --backtitle "Proxmox VE PBS Install Script" \
+        --title "ISO SOURCE" \
+        --yesno "Download a PBS ISO from the official repository?\n\nChoose 'No' to pick from existing ISOs on this host." 10 70; then
+        use_local="yes"
+    fi
+
+    if [[ "$use_local" == "yes" ]]; then
+        select_local_iso
+        return
+    fi
+
+    # Select ISO (non-interactive picks newest)
+    local chosen_url chosen_file chosen_date
+    if [[ "$NON_INTERACTIVE" == "yes" ]]; then
+        IFS='|' read -r chosen_date chosen_file chosen_url <<< "${ISO_ENTRIES[0]}"
+    else
+        local menu_items=()
+        for entry in "${ISO_ENTRIES[@]}"; do
+            IFS='|' read -r d f u <<< "$entry"
+            menu_items+=("$u" "$f  (${d})")
+        done
         chosen_url=$(whiptail --backtitle "Proxmox VE PBS Install Script" \
             --title "Available PBS ISOs" \
-            --menu "Select an ISO to download:\n\nUse arrow keys to navigate and Enter to select." \
-            20 100 8 \
+            --menu "Select an ISO to download:" 20 100 10 \
             "${menu_items[@]}" 3>&1 1>&2 2>&3) || exit_script
-        
-        download_iso "$chosen_url"
-    else
-        # Select local ISO
-        select_local_iso
+        for entry in "${ISO_ENTRIES[@]}"; do
+            IFS='|' read -r d f u <<< "$entry"
+            [[ "$u" == "$chosen_url" ]] && { chosen_file="$f"; chosen_date="$d"; break; }
+        done
     fi
+
+    ISO_BASENAME="$chosen_file"
+    ISO_EXPECTED_SHA=$(sha_for_iso "$chosen_file" "$sha_file" || true)
+    if [[ "$chosen_url" == "$FALLBACK_URL" && -z "$ISO_EXPECTED_SHA" ]]; then
+        ISO_EXPECTED_SHA="$FALLBACK_SHA256"
+    fi
+
+    download_iso "$chosen_url" "$chosen_file"
+}
+
+function select_iso_storage() {
+    # Where to store the ISO file — content type 'iso'
+    local menu_items=()
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" =~ ^Name ]] && continue
+        local tag stype free
+        tag=$(echo "$line" | awk '{print $1}')
+        stype=$(echo "$line" | awk '{print $2}')
+        free=$(echo "$line" | numfmt --field 4-6 --from-unit=K --to=iec --format %.2f | awk '{printf "%9sB", $6}')
+        [[ -z "$tag" ]] && continue
+        menu_items+=("$tag" "Type: $stype, Free: $free")
+    done < <(pvesm status -content iso 2>/dev/null)
+
+    if ((${#menu_items[@]} == 0)); then
+        msg_warn "No storage configured with 'iso' content — falling back to /var/lib/vz/template/iso"
+        ISO_STORAGE="local"
+        return
+    fi
+
+    # Auto-pick if only one option, or in non-interactive
+    if ((${#menu_items[@]} == 2)) || [[ "$NON_INTERACTIVE" == "yes" ]]; then
+        ISO_STORAGE="${menu_items[0]}"
+        msg_ok "Using ISO storage: $ISO_STORAGE"
+        return
+    fi
+
+    ISO_STORAGE=$(whiptail --backtitle "Proxmox VE PBS Install Script" \
+        --title "ISO STORAGE" \
+        --menu "Select storage for the PBS ISO:" 18 70 8 \
+        "${menu_items[@]}" 3>&1 1>&2 2>&3) || exit_script
+    msg_ok "Using ISO storage: $ISO_STORAGE"
+}
+
+function iso_storage_path() {
+    # Resolve the filesystem path for an ISO storage pool
+    local stg="$1"
+    local path
+    path=$(pvesm path "${stg}:iso/_" 2>/dev/null | sed 's|/_$||' || true)
+    if [[ -z "$path" ]]; then
+        path="/var/lib/vz/template/iso"
+    fi
+    mkdir -p "$path"
+    echo "$path"
+}
+
+function verify_iso_checksum() {
+    local file="$1"
+    local expected="$2"
+    [[ -z "$expected" ]] && { msg_warn "No checksum available — skipping verification"; return 0; }
+    msg_info "Verifying SHA256 checksum"
+    local actual
+    actual=$(sha256sum "$file" | awk '{print $1}')
+    if [[ "$actual" == "$expected" ]]; then
+        msg_ok "SHA256 verified: ${actual:0:16}…"
+        return 0
+    fi
+    msg_error "SHA256 mismatch!"
+    msg_error "  expected: $expected"
+    msg_error "  got:      $actual"
+    return 1
 }
 
 function download_iso() {
     local url="$1"
-    local basename=""
-    
-    # Determine basename
-    if [ "$url" = "$FALLBACK_URL" ]; then
-        basename="$FALLBACK_FILENAME"
-    else
-        # Find matching entry
-        for entry in "${iso_entries[@]}"; do
-            IFS='|' read -r entry_url filename date_str <<< "$entry"
-            if [ "$entry_url" = "$url" ]; then
-                basename="$filename"
-                break
-            fi
-        done
-        
-        if [ -z "$basename" ]; then
-            basename="$FALLBACK_FILENAME"
-        fi
-    fi
-    
-    ISO_BASENAME="$basename"
-    local iso_path="/var/lib/vz/template/iso/$basename"
-    
-    # Check if already exists
-    if [ -f "$iso_path" ]; then
-        if whiptail --backtitle "Proxmox VE PBS Install Script" \
-            --title "ISO EXISTS" \
-            --yesno "ISO file '$basename' already exists.\n\nUse existing file?" 10 60; then
-            msg_ok "Using existing ISO: $basename"
-            ISO_PATH="$iso_path"
-            return
-        else
+    local filename="$2"
+
+    select_iso_storage
+    local iso_dir
+    iso_dir=$(iso_storage_path "$ISO_STORAGE")
+    local iso_path="${iso_dir}/${filename}"
+
+    if [[ -f "$iso_path" ]]; then
+        if [[ "$NON_INTERACTIVE" != "yes" ]] && \
+           ! whiptail --backtitle "Proxmox VE PBS Install Script" \
+             --title "ISO EXISTS" \
+             --yesno "ISO '$filename' already exists.\n\nUse existing file?" 10 60; then
             msg_info "Removing existing ISO"
             rm -f "$iso_path"
-        fi
-    fi
-    
-    # Download ISO
-    msg_info "Downloading PBS ISO (this may take several minutes)"
-    
-    if wget --progress=bar:force:noscroll "$url" -O "$iso_path" 2>&1 | \
-        stdbuf -o0 awk '/[.] +[0-9][0-9]?[0-9]?%/ { print substr($0,63,3) }' | \
-        whiptail --gauge "Downloading PBS ISO..." 8 50 0; then
-        msg_ok "Downloaded $basename"
-        ISO_PATH="$iso_path"
-    else
-        msg_error "Failed to download PBS ISO"
-        rm -f "$iso_path"
-        
-        if whiptail --backtitle "Proxmox VE PBS Install Script" \
-            --title "DOWNLOAD FAILED" \
-            --yesno "Download failed. Select a local ISO instead?" 10 60; then
-            select_local_iso
+            msg_ok "Removed"
         else
-            exit 1
+            # Verify existing file if checksum known
+            if [[ -n "$ISO_EXPECTED_SHA" ]]; then
+                if verify_iso_checksum "$iso_path" "$ISO_EXPECTED_SHA"; then
+                    ISO_PATH="$iso_path"
+                    msg_ok "Using existing verified ISO: $filename"
+                    return 0
+                else
+                    msg_warn "Existing ISO failed checksum — re-downloading"
+                    rm -f "$iso_path"
+                fi
+            else
+                ISO_PATH="$iso_path"
+                msg_ok "Using existing ISO (unverified): $filename"
+                return 0
+            fi
         fi
     fi
+
+    msg_info "Downloading $filename"
+    # shellcheck disable=SC2016
+    if wget --tries=2 --timeout=60 --progress=bar:force:noscroll "$url" -O "$iso_path" 2>&1 | \
+        stdbuf -o0 awk '/[.] +[0-9][0-9]?[0-9]?%/ { print substr($0,63,3) }' | \
+        whiptail --gauge "Downloading PBS ISO..." 8 60 0; then
+        msg_ok "Downloaded $filename"
+    else
+        msg_error "Download failed"
+        rm -f "$iso_path"
+        exit 1
+    fi
+
+    verify_iso_checksum "$iso_path" "$ISO_EXPECTED_SHA" || {
+        rm -f "$iso_path"
+        exit 1
+    }
+
+    ISO_PATH="$iso_path"
 }
 
 function select_local_iso() {
+    select_iso_storage
+    local iso_dir
+    iso_dir=$(iso_storage_path "$ISO_STORAGE")
+
     local iso_list=()
-    local iso_dir="/var/lib/vz/template/iso"
-    
-    # Find all ISO files
     while IFS= read -r iso_file; do
-        local basename=$(basename "$iso_file")
-        local size=$(du -h "$iso_file" | cut -f1)
-        iso_list+=("$basename" "Size: $size")
-    done < <(find "$iso_dir" -type f -name "*.iso" | sort)
-    
-    if [ ${#iso_list[@]} -eq 0 ]; then
+        local base size
+        base=$(basename "$iso_file")
+        size=$(du -h "$iso_file" 2>/dev/null | cut -f1)
+        iso_list+=("$base" "Size: $size")
+    done < <(find "$iso_dir" -maxdepth 1 -type f -name "*.iso" 2>/dev/null | sort)
+
+    if ((${#iso_list[@]} == 0)); then
         msg_error "No ISO files found in $iso_dir"
         exit 1
     fi
-    
-    local chosen_iso
-    chosen_iso=$(whiptail --backtitle "Proxmox VE PBS Install Script" \
+
+    local chosen
+    chosen=$(whiptail --backtitle "Proxmox VE PBS Install Script" \
         --title "Local ISO Files" \
-        --menu "Select a local ISO file:" 20 80 10 \
+        --menu "Select a local ISO:" 20 80 10 \
         "${iso_list[@]}" 3>&1 1>&2 2>&3) || exit_script
-    
-    if [ -z "$chosen_iso" ]; then
-        msg_error "No ISO selected"
-        exit 1
-    fi
-    
-    ISO_PATH="$iso_dir/$chosen_iso"
-    ISO_BASENAME="$chosen_iso"
-    msg_ok "Using local ISO: $chosen_iso"
+
+    ISO_PATH="${iso_dir}/${chosen}"
+    ISO_BASENAME="$chosen"
+    msg_ok "Using local ISO: $chosen"
 }
 
-###############################################
-#           STORAGE SELECTION                 #
-###############################################
+#################################################################################
+# Disk Storage Selection                                                         #
+#################################################################################
 
-function select_storage() {
-    local storage_menu=()
-    local msg_max_length=0
-    
-    while read -r line; do
-        local tag=$(echo "$line" | awk '{print $1}')
-        local type=$(echo "$line" | awk '{printf "%-10s", $2}')
-        local free=$(echo "$line" | numfmt --field 4-6 --from-unit=K --to=iec --format %.2f | awk '{printf("%9sB", $6)}')
-        local total=$(echo "$line" | numfmt --field 4-6 --from-unit=K --to=iec --format %.2f | awk '{printf("%9sB", $5)}')
-        local item="Type: $type | Free: $free / Total: $total"
-        
-        if [[ $((${#item} + 2)) -gt ${msg_max_length} ]]; then
-            msg_max_length=$((${#item} + 2))
-        fi
-        
-        storage_menu+=("$tag" "$item")
-    done < <(pvesm status -content images | awk 'NR>1')
-    
-    if [[ ${#storage_menu[@]} -eq 0 ]]; then
-        msg_error "No valid storage locations found"
+function select_disk_storage() {
+    local menu_items=()
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" =~ ^Name ]] && continue
+        local tag stype free
+        tag=$(echo "$line" | awk '{print $1}')
+        stype=$(echo "$line" | awk '{print $2}')
+        free=$(echo "$line" | numfmt --field 4-6 --from-unit=K --to=iec --format %.2f | awk '{printf "%9sB", $6}')
+        [[ -z "$tag" ]] && continue
+        menu_items+=("$tag" "Type: $stype, Free: $free")
+    done < <(pvesm status -content images 2>/dev/null)
+
+    if ((${#menu_items[@]} == 0)); then
+        msg_error "No storage configured with 'images' content"
         exit 1
     fi
-    
-    # Auto-select if only one storage
-    if [[ ${#storage_menu[@]} -eq 2 ]]; then
-        STORAGE="${storage_menu[0]}"
-        msg_ok "Using storage: $STORAGE"
+
+    if ((${#menu_items[@]} == 2)) || [[ "$NON_INTERACTIVE" == "yes" ]]; then
+        STORAGE="${menu_items[0]}"
+        msg_ok "Using disk storage: $STORAGE"
         return
     fi
-    
+
     STORAGE=$(whiptail --backtitle "Proxmox VE PBS Install Script" \
-        --title "Storage Selection" \
-        --menu "Select storage location for PBS VM:\n\nUse arrow keys to navigate and Enter to select." \
-        20 $((msg_max_length + 30)) 10 \
-        "${storage_menu[@]}" 3>&1 1>&2 2>&3) || exit_script
-    
-    msg_ok "Using storage: $STORAGE"
+        --title "DISK STORAGE" \
+        --menu "Select storage for the PBS VM disks:" 18 70 8 \
+        "${menu_items[@]}" 3>&1 1>&2 2>&3) || exit_script
+    msg_ok "Using disk storage: $STORAGE"
 }
 
-###############################################
-#              VM CREATION                    #
-###############################################
+#################################################################################
+# VM Creation                                                                    #
+#################################################################################
 
 function create_vm() {
     msg_info "Creating PBS VM (ID: $VMID)"
-    
-    # Build network options
-    local network_opts="virtio,bridge=$BRG,macaddr=$MAC"
-    if [[ -n "$VLAN" ]]; then
-        network_opts="$network_opts,tag=$VLAN"
-    fi
-    if [[ -n "$MTU" && "$MTU" != "$DEFAULT_MTU" ]]; then
-        network_opts="$network_opts,mtu=$MTU"
-    fi
-    
-    # Create VM with base configuration
-    local create_cmd="qm create $VMID"
-    create_cmd="$create_cmd -agent $([[ $QEMU_AGENT == "yes" ]] && echo "enabled=1" || echo "enabled=0")"
-    create_cmd="$create_cmd -tablet 0"
-    create_cmd="$create_cmd -localtime 1"
-    create_cmd="$create_cmd -bios ovmf"
-    create_cmd="$create_cmd -machine $MACHINE"
-    create_cmd="$create_cmd -cpu $CPU_TYPE"
-    create_cmd="$create_cmd -cores $CORE_COUNT"
-    create_cmd="$create_cmd -memory $RAM_SIZE"
-    create_cmd="$create_cmd -balloon $([[ $BALLOON == "yes" ]] && echo "$RAM_SIZE" || echo "0")"
-    create_cmd="$create_cmd -name $HN"
-    create_cmd="$create_cmd -tags $VM_TAG"
-    create_cmd="$create_cmd -net0 $network_opts"
-    create_cmd="$create_cmd -onboot 1"
-    create_cmd="$create_cmd -ostype l26"
-    create_cmd="$create_cmd -scsihw virtio-scsi-pci"
-    
-    if [[ $PROTECTION == "yes" ]]; then
-        create_cmd="$create_cmd -protection 1"
-    fi
-    
-    # Execute creation
-    if ! eval "$create_cmd"; then
-        msg_error "Failed to create VM"
+
+    local network_opts="virtio,bridge=${BRG},macaddr=${MAC}"
+    [[ -n "$VLAN" ]] && network_opts+=",tag=${VLAN}"
+    [[ -n "$MTU" && "$MTU" != "$DEFAULT_MTU" ]] && network_opts+=",mtu=${MTU}"
+
+    local -a args=(
+        --agent "$([[ "$QEMU_AGENT" == "yes" ]] && echo "enabled=1,fstrim_cloned_disks=1" || echo "enabled=0")"
+        --tablet 0
+        --localtime 1
+        --bios ovmf
+        --machine "$MACHINE"
+        --cpu "$CPU_TYPE"
+        --cores "$CORE_COUNT"
+        --sockets 1
+        --memory "$RAM_SIZE"
+        --balloon "$([[ "$BALLOON" == "yes" ]] && echo "$RAM_SIZE" || echo 0)"
+        --name "$HN"
+        --tags "$VM_TAG"
+        --net0 "$network_opts"
+        --onboot 1
+        --ostype l26
+        --scsihw virtio-scsi-single
+    )
+    [[ "$PROTECTION" == "yes" ]] && args+=(--protection 1)
+    [[ "$SERIAL_CONSOLE" == "yes" ]] && args+=(--serial0 socket --vga serial0)
+
+    if ! qm create "$VMID" "${args[@]}" &>"/tmp/qm-create-${VMID}.log"; then
+        msg_error "Failed to create VM shell — see /tmp/qm-create-${VMID}.log"
+        cat "/tmp/qm-create-${VMID}.log" >&2
         exit 1
     fi
-    
-    # Add serial console if requested
-    if [[ $SERIAL_CONSOLE == "yes" ]]; then
-        qm set "$VMID" -serial0 socket
-    fi
-    
-    msg_ok "VM shell created successfully"
+    msg_ok "VM shell created"
 }
 
 function attach_disks() {
-    msg_info "Creating and attaching disks"
-    
-    # Create EFI disk
     msg_info "Creating EFI disk (${EFI_DISK_SIZE})"
-    if ! qm set "$VMID" -efidisk0 "${STORAGE}:0,size=${EFI_DISK_SIZE},efitype=4m"; then
-        msg_error "Failed to create EFI disk"
-        exit 1
-    fi
-    
-    # Allocate main disk
-    msg_info "Allocating main disk (${DISK_SIZE})"
-    local disk_name="vm-${VMID}-disk-1"
-    if ! pvesm alloc "$STORAGE" "$VMID" "$disk_name" "$DISK_SIZE"; then
-        msg_error "Failed to allocate disk space"
-        exit 1
-    fi
-    
-    # Attach main disk with retries
-    local retry_count=5
-    local retry_delay=3
-    local disk_opts="${STORAGE}:${disk_name}"
-    
-    if [[ -n "$DISK_CACHE" && "$DISK_CACHE" != "none" ]]; then
-        disk_opts="${disk_opts},cache=${DISK_CACHE}"
-    fi
-    
-    for ((i=1; i<=retry_count; i++)); do
-        if qm set "$VMID" -scsi0 "$disk_opts"; then
-            msg_ok "Main disk attached successfully"
+    qm set "$VMID" --efidisk0 "${STORAGE}:1,size=${EFI_DISK_SIZE},efitype=4m,pre-enrolled-keys=0" &>/dev/null
+    msg_ok "EFI disk attached"
+
+    msg_info "Allocating OS disk (${DISK_SIZE})"
+    # Strip trailing G/M suffix for pvesm alloc which wants bytes or K
+    local disk_size_arg="$DISK_SIZE"
+    [[ ! "$disk_size_arg" =~ [GMKT]$ ]] && disk_size_arg="${disk_size_arg}G"
+
+    local disk_opts="${STORAGE}:${DISK_SIZE%[GMKTgmkt]},format=raw"
+    # Modern approach: let qm provision via volume shorthand
+    local main_disk="${STORAGE}:${DISK_SIZE%[GMKTgmkt]}"
+    [[ -n "$DISK_CACHE" ]] && main_disk+=",cache=${DISK_CACHE}"
+    main_disk+=",iothread=1,ssd=1,discard=on"
+
+    local retry=5
+    for ((i=1; i<=retry; i++)); do
+        if qm set "$VMID" --scsi0 "$main_disk" &>"/tmp/qm-disk-${VMID}.log"; then
+            msg_ok "OS disk attached"
             break
-        else
-            msg_warn "Attempt $i/$retry_count: Failed to attach disk"
-            if [[ $i -lt $retry_count ]]; then
-                sleep $retry_delay
-            else
-                msg_error "Failed to attach main disk after $retry_count attempts"
-                exit 1
-            fi
+        fi
+        msg_warn "Disk attach attempt $i/$retry failed — retrying"
+        sleep 3
+        if ((i == retry)); then
+            cat "/tmp/qm-disk-${VMID}.log" >&2
+            msg_error "Could not attach OS disk"
+            exit 1
         fi
     done
-    
-    # Attach ISO
+
     msg_info "Attaching installation ISO"
-    if ! qm set "$VMID" -ide2 "local:iso/$ISO_BASENAME,media=cdrom"; then
-        msg_error "Failed to attach ISO"
-        exit 1
+    # Use the ISO storage pool:iso/filename reference
+    local iso_ref
+    if [[ "$ISO_STORAGE" != "local" && -n "$ISO_STORAGE" ]]; then
+        iso_ref="${ISO_STORAGE}:iso/${ISO_BASENAME}"
+    else
+        iso_ref="local:iso/${ISO_BASENAME}"
     fi
-    
-    # Set boot order
-    if ! qm set "$VMID" -boot order=ide2 -bootdisk scsi0; then
-        msg_error "Failed to set boot order"
-        exit 1
-    fi
-    
-    msg_ok "All disks attached successfully"
+    qm set "$VMID" --ide2 "${iso_ref},media=cdrom" &>/dev/null
+    msg_ok "Installation ISO attached"
+
+    msg_info "Setting boot order (CD-ROM first)"
+    qm set "$VMID" --boot "order=ide2;scsi0" &>/dev/null
+    msg_ok "Boot order set"
 }
 
 function set_vm_description() {
-    local creation_date=$(date +"%Y-%m-%d %H:%M:%S")
-    local description="<div align='center'>
-<h2>Proxmox Backup Server VM</h2>
+    local creation_date
+    creation_date=$(date +"%Y-%m-%d %H:%M:%S %Z")
+    local sha_line="unverified"
+    [[ -n "$ISO_EXPECTED_SHA" ]] && sha_line="${ISO_EXPECTED_SHA:0:16}…"
 
-<p><strong>Created:</strong> $creation_date</p>
-<p><strong>VM ID:</strong> $VMID</p>
-<p><strong>ISO Used:</strong> $ISO_BASENAME</p>
-
-<hr>
-
-<h3>Configuration</h3>
-<table style='text-align: left;'>
-<tr><td><strong>CPU:</strong></td><td>$CORE_COUNT cores ($CPU_TYPE)</td></tr>
-<tr><td><strong>RAM:</strong></td><td>$RAM_SIZE MiB</td></tr>
-<tr><td><strong>Disk:</strong></td><td>$DISK_SIZE</td></tr>
-<tr><td><strong>Network:</strong></td><td>Bridge: $BRG"
-    
-    if [[ -n "$VLAN" ]]; then
-        description="$description, VLAN: $VLAN"
-    fi
-    
-    description="$description</td></tr>
-</table>
-
-<hr>
-
-<p><a href='https://www.proxmox.com/en/proxmox-backup-server' target='_blank' rel='noopener noreferrer'>
-<img src='https://www.proxmox.com/images/proxmox/Proxmox_logo_standard_hex_400px.png' alt='Proxmox Logo' style='width: 200px;'/>
-</a></p>
-
-<p><strong>Default Credentials:</strong><br>
-Username: <code>root@pam</code><br>
-Password: Set during installation</p>
-</div>"
-    
-    qm set "$VMID" -description "$description"
+    local description
+    description=$(cat <<EOF
+<div align='center'>
+  <h2>Proxmox Backup Server VM</h2>
+  <p><strong>Created:</strong> ${creation_date}</p>
+  <p><strong>ISO:</strong> ${ISO_BASENAME}</p>
+  <p><strong>SHA256:</strong> ${sha_line}</p>
+  <hr>
+  <table style='text-align:left'>
+    <tr><td><strong>VM ID:</strong></td><td>${VMID}</td></tr>
+    <tr><td><strong>Hostname:</strong></td><td>${HN}</td></tr>
+    <tr><td><strong>CPU:</strong></td><td>${CORE_COUNT} × ${CPU_TYPE}</td></tr>
+    <tr><td><strong>RAM:</strong></td><td>${RAM_SIZE} MiB</td></tr>
+    <tr><td><strong>Disk:</strong></td><td>${DISK_SIZE} on ${STORAGE}</td></tr>
+    <tr><td><strong>Network:</strong></td><td>${BRG}${VLAN:+ (VLAN ${VLAN})}</td></tr>
+    <tr><td><strong>MAC:</strong></td><td>${MAC}</td></tr>
+  </table>
+  <hr>
+  <p><a href='https://www.proxmox.com/en/proxmox-backup-server' target='_blank' rel='noopener'>
+    Proxmox Backup Server home
+  </a></p>
+  <p>After installation, reach the web UI at <code>https://&lt;VM-IP&gt;:8007</code></p>
+</div>
+EOF
+)
+    qm set "$VMID" --description "$description" &>/dev/null
 }
 
-###############################################
-#        POST-INSTALLATION HELPERS            #
-###############################################
+#################################################################################
+# Post-install Helpers                                                           #
+#################################################################################
 
 function show_post_install_info() {
+    [[ "$NON_INTERACTIVE" == "yes" ]] && return 0
     whiptail --backtitle "Proxmox VE PBS Install Script" \
         --title "POST-INSTALLATION STEPS" \
-        --msgbox "PBS Installation Steps:
+        --msgbox "PBS installation steps:
 
-1. Start the VM and boot from ISO
-2. Select 'Install Proxmox Backup Server'
-3. Accept the license agreement
-4. Select target disk (usually /dev/sda)
-5. Configure timezone and password
-6. Configure network settings
-7. Complete installation and reboot
+ 1. Boot the VM from the attached ISO
+ 2. Select 'Install Proxmox Backup Server (Graphical)'
+ 3. Accept the EULA and choose target disk
+ 4. Set timezone and root password
+ 5. Configure network (IP, gateway, DNS, hostname)
+ 6. Finish install and reboot
+ 7. Log in to the web UI at https://<IP>:8007
 
-After installation:
-- Access PBS at https://${BRG_IP}:8007
-- Login with root@pam and your password
-- Configure datastore and backup jobs
+After first login, add a datastore, a remote PVE host, and a backup schedule.
 
-Press Enter to continue..." 20 70
+Press Enter to continue..." 20 74
 }
 
 function configure_post_install() {
-    if whiptail --backtitle "Proxmox VE PBS Install Script" \
+    [[ "$NON_INTERACTIVE" == "yes" ]] && return 0
+    if ! whiptail --backtitle "Proxmox VE PBS Install Script" \
         --title "POST-INSTALLATION" \
-        --yesno "Would you like to:
+        --yesno "Remove installer ISO and set boot from disk?" 10 60; then
+        return 0
+    fi
 
-1. Remove the installation ISO
-2. Set proper boot order
-3. Configure automatic startup
+    msg_info "Stopping VM"
+    qm stop "$VMID" &>/dev/null || true
+    local timeout=30
+    while [[ $timeout -gt 0 ]] && qm status "$VMID" 2>/dev/null | grep -q "running"; do
+        sleep 1; ((timeout--))
+    done
+    msg_ok "VM stopped"
 
-Proceed with post-installation configuration?" 12 60; then
-        
-        msg_info "Stopping VM for configuration"
-        qm stop "$VMID" || true
-        
-        # Wait for VM to stop
-        local timeout=30
-        while [[ $timeout -gt 0 ]] && qm status "$VMID" | grep -q "running"; do
-            sleep 1
-            ((timeout--))
-        done
-        
-        msg_info "Removing installation media"
-        qm set "$VMID" -delete ide2
-        
-        msg_info "Setting boot order to main disk"
-        qm set "$VMID" -boot order=scsi0
-        
-        if whiptail --backtitle "Proxmox VE PBS Install Script" \
-            --title "AUTO-START" \
-            --yesno "Enable automatic VM startup on host boot?" 8 60; then
-            qm set "$VMID" -onboot 1 -startup "order=1,up=30"
-            msg_ok "Automatic startup configured"
-        fi
-        
-        msg_ok "Post-installation configuration complete"
-        
-        if whiptail --backtitle "Proxmox VE PBS Install Script" \
-            --title "START VM" \
-            --yesno "Start the PBS VM now?" 8 60; then
-            msg_info "Starting PBS VM"
-            qm start "$VMID"
-            msg_ok "PBS VM started"
-        fi
+    msg_info "Removing installation ISO"
+    qm set "$VMID" --delete ide2 &>/dev/null || true
+    msg_ok "ISO detached"
+
+    msg_info "Setting disk-only boot order"
+    qm set "$VMID" --boot "order=scsi0" &>/dev/null
+    msg_ok "Boot order set to disk"
+
+    if whiptail --backtitle "Proxmox VE PBS Install Script" \
+        --title "AUTO-START" \
+        --yesno "Enable auto-start on host boot?" 8 60; then
+        qm set "$VMID" --onboot 1 --startup "order=1,up=30" &>/dev/null
+        msg_ok "Auto-start enabled"
+    fi
+
+    if whiptail --backtitle "Proxmox VE PBS Install Script" \
+        --title "START VM" \
+        --yesno "Start the PBS VM now?" 8 60; then
+        msg_info "Starting VM"
+        qm start "$VMID"
+        msg_ok "PBS VM started"
     fi
 }
 
-###############################################
-#              MAIN EXECUTION                 #
-###############################################
+#################################################################################
+# Main                                                                           #
+#################################################################################
 
-# Show header
+parse_args "$@"
+
 header_info
 echo
-read -rsp "Press Enter to continue..." -n1 key
-echo
+if [[ "$NON_INTERACTIVE" != "yes" ]]; then
+    read -rsp "Press Enter to continue..." -n1 _ && echo
+fi
 
-# Initial setup message
-msg_info "Initializing Proxmox Backup Server VM creation script"
+msg_ok "Initialising Proxmox Backup Server VM creation"
 
-# Run all checks
 check_root
 check_dependencies
 arch_check
 pve_check
 ssh_check
 
-# Confirm proceeding
-if ! whiptail --backtitle "Proxmox VE PBS Install Script" \
-    --title "Proxmox Backup Server VM" \
-    --yesno "This script will create a new Proxmox Backup Server VM.
+if [[ "$NON_INTERACTIVE" != "yes" ]]; then
+    if ! whiptail --backtitle "Proxmox VE PBS Install Script" \
+        --title "Proxmox Backup Server VM" \
+        --yesno "This script will create a new Proxmox Backup Server VM.
 
 Requirements:
-- Proxmox VE 8.1 or later
-- At least 2GB RAM available
-- At least 30GB disk space
-- Network bridge configured
+  - Proxmox VE 8.1+ or 9.x
+  - 4+ GB RAM available on host
+  - 32+ GB free on target storage
+  - Working network bridge (default: ${DEFAULT_BRIDGE})
+  - Internet access (for ISO download)
 
-Proceed with VM creation?" 15 70; then
-    header_info
-    echo -e "User cancelled operation.\n"
-    exit 1
+Proceed with VM creation?" 17 70; then
+        exit_script
+    fi
 fi
 
-# Configure VM settings
+# Configure
 start_script
 
-# Verify bridge exists
+# Validate bridge
 verify_bridge_exists "$BRG"
 
-# Display configuration summary
-whiptail --backtitle "Proxmox VE PBS Install Script" \
-    --title "CONFIGURATION SUMMARY" \
-    --msgbox "VM Configuration:
+# Summary
+if [[ "$NON_INTERACTIVE" != "yes" ]]; then
+    whiptail --backtitle "Proxmox VE PBS Install Script" \
+        --title "CONFIGURATION SUMMARY" \
+        --msgbox "VM Configuration
 
-VM ID: $VMID
+VMID:     $VMID
 Hostname: $HN
-CPU: $CORE_COUNT cores ($CPU_TYPE)
-RAM: $RAM_SIZE MiB
-Disk: $DISK_SIZE
-Network: Bridge $BRG$([ -n "$VLAN" ] && echo ", VLAN $VLAN")
-Machine: $MACHINE
-Tags: $VM_TAG
+Machine:  $MACHINE / OVMF
+CPU:      $CORE_COUNT × $CPU_TYPE
+RAM:      $RAM_SIZE MiB
+Disk:     $DISK_SIZE
+Bridge:   $BRG${VLAN:+ (VLAN $VLAN)}
+MAC:      $MAC
+Tags:     $VM_TAG
 
-Press Enter to proceed..." 18 60
+Press Enter to proceed..." 20 70
+fi
 
-# Create temporary directory
+# Temp workdir
 TEMP_DIR=$(mktemp -d)
 pushd "$TEMP_DIR" >/dev/null
 
-# Select and prepare ISO
+# ISO discovery + download
 select_iso
 
-# Select storage
-select_storage
+# Disk storage selection
+select_disk_storage
 
-# Create VM
+# Build VM
 create_vm
-
-# Attach disks and ISO
 attach_disks
-
-# Set VM description
 set_vm_description
 
 msg_ok "PBS VM created successfully (ID: $VMID, Name: $HN)"
 
-# Handle VM startup and installation
+# Startup and post-install flow
 if [[ "$START_VM" == "yes" ]]; then
     msg_info "Starting PBS VM"
     qm start "$VMID"
     msg_ok "PBS VM started"
-    
-    # Show post-installation information
     show_post_install_info
-    
-    # Wait for installation
-    if whiptail --backtitle "Proxmox VE PBS Install Script" \
-        --title "INSTALLATION IN PROGRESS" \
-        --yesno "Is the PBS installation complete?" 8 60; then
-        configure_post_install
+    if [[ "$NON_INTERACTIVE" != "yes" ]]; then
+        if whiptail --backtitle "Proxmox VE PBS Install Script" \
+            --title "INSTALLATION" \
+            --yesno "Once the PBS installer has finished and the VM has rebooted into the installed system, select Yes to detach the ISO and set disk-first boot order.
+
+Is the PBS installation finished?" 12 70; then
+            configure_post_install
+        fi
     fi
 else
     msg_info "VM created but not started"
-    msg_info "Start manually with: qm start $VMID"
+    echo -e "${TAB}Start manually with: ${GN}qm start $VMID${CL}"
 fi
 
-# Cleanup
 popd >/dev/null
-cleanup
 
 # Final summary
 echo
-msg_ok "Proxmox Backup Server VM setup completed!"
+msg_ok "Proxmox Backup Server VM setup complete!"
 echo
-echo -e "${INFO} VM Information:"
-echo -e "  ID: ${GN}$VMID${CL}"
-echo -e "  Name: ${GN}$HN${CL}"
-echo -e "  Storage: ${GN}$STORAGE${CL}"
+echo -e "${INFO} ${HA}VM Information${CL}"
+echo -e "${TAB}ID:       ${GN}$VMID${CL}"
+echo -e "${TAB}Name:     ${GN}$HN${CL}"
+echo -e "${TAB}Storage:  ${GN}$STORAGE${CL}"
+echo -e "${TAB}ISO:      ${GN}$ISO_BASENAME${CL}"
+echo -e "${TAB}MAC:      ${GN}$MAC${CL}"
 echo
-
-if [[ $SERIAL_CONSOLE == "yes" ]]; then
-    echo -e "${INFO} Access Options:"
-    echo -e "  Console: ${GN}qm terminal $VMID${CL}"
-    echo -e "  Serial: ${GN}qm terminal $VMID -iface serial0${CL}"
+echo -e "${INFO} ${HA}Console Access${CL}"
+if [[ "$SERIAL_CONSOLE" == "yes" ]]; then
+    echo -e "${TAB}VGA:      ${GN}qm terminal $VMID${CL}"
+    echo -e "${TAB}Serial:   ${GN}qm terminal $VMID -iface serial0${CL}"
 else
-    echo -e "${INFO} Console Access: ${GN}qm terminal $VMID${CL}"
+    echo -e "${TAB}Console:  ${GN}qm terminal $VMID${CL}"
 fi
-
 echo
-echo -e "${INFO} Default PBS Credentials:"
-echo -e "  Username: ${GN}root@pam${CL}"
-echo -e "  Password: ${GN}(set during installation)${CL}"
-echo
-echo -e "${INFO} After installation, access PBS at:"
-echo -e "  ${GN}https://<PBS-IP>:8007${CL}"
+echo -e "${INFO} ${HA}After Installation${CL}"
+echo -e "${TAB}Web UI:   ${GN}https://<PBS-IP>:8007${CL}"
+echo -e "${TAB}Login:    ${GN}root@pam${CL} (password set during install)"
 echo
 
 exit 0
