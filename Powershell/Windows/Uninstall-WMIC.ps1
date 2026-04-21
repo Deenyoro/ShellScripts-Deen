@@ -1,92 +1,100 @@
-# Uninstall-WMIC.ps1
-# Script to remove WMIC and clean up marker file
+﻿<#
+.SYNOPSIS
+    Remove the WMIC Windows capability (via Remove-WindowsCapability first,
+    DISM fallback second) and clean up the install-marker file.
+#>
 
-# Enable strict mode for better error handling
+#Requires -RunAsAdministrator
+[CmdletBinding()]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter','CapabilityName',Justification='Used inside nested functions via script scope.')]
+param(
+    [string]$CapabilityName = 'WMIC~~~~',
+    [string]$MarkerFile     = 'C:\MDM\wmic_install_complete.txt',
+    [string]$LogFile        = 'C:\MDM\wmic_uninstall.log'
+)
+
 Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 
-# Define Variables
-$capabilityName = "WMIC~~~~"
-$markerFilePath = "C:\MDM\wmicinstalled.txt"
-$dismRemoveCommand = "DISM /Online /Remove-Capability /CapabilityName:$capabilityName"
+$wmicPath = Join-Path $env:WinDir 'System32\wbem\WMIC.exe'
 
-# Function to log messages with timestamps
-function Write-Log {
-    param (
-        [string]$Message
+foreach ($p in ($LogFile, $MarkerFile)) {
+    $parent = Split-Path -Parent $p
+    if (-not (Test-Path -LiteralPath $parent)) { New-Item -Path $parent -ItemType Directory -Force | Out-Null }
+}
+
+function Write-MdmLog {
+    param(
+        [Parameter(Mandatory)][string]$Message,
+        [ValidateSet('INFO','WARN','ERROR')] [string]$Severity = 'INFO'
     )
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Write-Output "$timestamp - $Message"
+    $line = "{0} [{1}] {2}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Severity, $Message
+    Add-Content -LiteralPath $LogFile -Value $line
+    Write-Host $line
 }
 
-# Function to check if WMIC is installed
-function Is-WMICInstalled {
-    $wmicCapability = Get-WindowsCapability -Online -Name $capabilityName -ErrorAction SilentlyContinue
-    if ($wmicCapability -and $wmicCapability.State -eq "Installed") {
+function Test-WmicCapabilityInstalled {
+    try {
+        $c = Get-WindowsCapability -Online -Name $CapabilityName -ErrorAction Stop
+        return ($c.State -eq 'Installed')
+    } catch {
+        return $false
+    }
+}
+
+function Uninstall-WmicCapability {
+    try {
+        Remove-WindowsCapability -Online -Name $CapabilityName -ErrorAction Stop | Out-Null
+        Write-MdmLog 'Remove-WindowsCapability succeeded.'
         return $true
-    } else {
+    } catch {
+        Write-MdmLog "Remove-WindowsCapability failed: $($_.Exception.Message)" 'WARN'
         return $false
     }
 }
 
-# Function to uninstall WMIC using DISM
-function Uninstall-WMIC_Dism {
+function Uninstall-WmicViaDism {
     try {
-        Write-Log "Attempting to uninstall WMIC using DISM..."
-        # Execute DISM command
-        $process = Start-Process -FilePath "cmd.exe" -ArgumentList "/c $dismRemoveCommand" -Wait -NoNewWindow -PassThru
-        if ($process.ExitCode -eq 0) {
-            Write-Log "DISM command executed successfully."
+        $proc = Start-Process -FilePath 'dism.exe' `
+            -ArgumentList '/Online','/Remove-Capability',"/CapabilityName:$CapabilityName" `
+            -Wait -NoNewWindow -PassThru
+        if ($proc.ExitCode -eq 0) {
+            Write-MdmLog 'DISM remove succeeded.'
             return $true
-        } else {
-            Write-Log "DISM command failed with Exit Code: $($process.ExitCode)"
-            return $false
         }
+        Write-MdmLog "DISM remove failed (exit $($proc.ExitCode))." 'ERROR'
+        return $false
     } catch {
-        Write-Log "DISM command failed: $_"
+        Write-MdmLog "DISM remove threw: $($_.Exception.Message)" 'ERROR'
         return $false
     }
 }
 
-# Function to delete the marker file
-function Delete-MarkerFile {
-    try {
-        if (Test-Path $markerFilePath) {
-            Remove-Item -Path $markerFilePath -Force
-            Write-Log "Deleted marker file at $markerFilePath."
-        } else {
-            Write-Log "Marker file does not exist. No action needed."
+Write-MdmLog '----- WMIC uninstall starting -----'
+
+if (-not (Test-WmicCapabilityInstalled)) {
+    Write-MdmLog 'WMIC capability not installed; nothing to do.'
+} else {
+    if (-not (Uninstall-WmicCapability)) {
+        if (-not (Uninstall-WmicViaDism)) {
+            Write-MdmLog 'Uninstall failed via both methods.' 'ERROR'
+            exit 1
         }
-    } catch {
-        Write-Log "Failed to delete marker file: $_"
     }
 }
 
-# Main Execution Flow
-Write-Log "----- Starting WMIC Uninstallation Script -----"
+$stillInstalled = Test-WmicCapabilityInstalled
+$exeStillThere  = Test-Path -LiteralPath $wmicPath
 
-# Check if WMIC is installed
-if (Is-WMICInstalled) {
-    Write-Log "WMIC is installed. Proceeding with uninstallation..."
-    $uninstallResult = Uninstall-WMIC_Dism
-    if ($uninstallResult) {
-        Write-Log "WMIC uninstallation command executed. Verifying..."
-    } else {
-        Write-Log "Failed to uninstall WMIC using DISM."
+if (-not ($stillInstalled -or $exeStillThere)) {
+    Write-MdmLog 'Uninstall verified.'
+    if (Test-Path -LiteralPath $MarkerFile) {
+        Remove-Item -LiteralPath $MarkerFile -Force
+        Write-MdmLog "Removed marker $MarkerFile"
     }
 } else {
-    Write-Log "WMIC is not installed. No uninstallation needed."
+    Write-MdmLog "Verification failed (capability installed: $stillInstalled, wmic.exe present: $exeStillThere)." 'ERROR'
+    exit 1
 }
 
-# Verify uninstallation
-$wmicPathExists = Test-Path "C:\Windows\System32\wbem\wmic.exe"
-$wmicCapabilityState = Is-WMICInstalled
-
-if (-not ($wmicPathExists -or $wmicCapabilityState)) {
-    Write-Log "WMIC uninstallation verified."
-    # Delete marker file
-    Delete-MarkerFile
-} else {
-    Write-Log "WMIC uninstallation verification failed."
-}
-
-Write-Log "----- WMIC Uninstallation Script Completed -----"
+Write-MdmLog '----- Done -----'

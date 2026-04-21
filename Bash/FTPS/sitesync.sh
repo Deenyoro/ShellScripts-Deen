@@ -1,121 +1,209 @@
-#!/bin/bash
+#!/usr/bin/env bash
+# sitesync.sh — mirror an FTPS site into a local Git repo and push to origin.
+#
+# Flow:
+#   1. Load config from sitesync.env (same directory as this script).
+#   2. Ensure SSH key exists and is loaded in a script-scoped ssh-agent.
+#   3. Ensure the Git working copy exists and is on the correct branch.
+#   4. Mirror FTPS → a staging directory, then rsync into the working copy
+#      (this keeps .git safe from lftp's --delete).
+#   5. Commit any changes and push (never force-push by default).
 
-# Load environment variables
-SCRIPT_DIR="$(dirname "$0")"
-ENV_FILE="$SCRIPT_DIR/sitesync.env"
-if [ -f "$ENV_FILE" ]; then
-    source "$ENV_FILE"
-else
-    echo "Environment file not found: $ENV_FILE"
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${SCRIPT_DIR}/sitesync.env"
+
+if [[ ! -f "${ENV_FILE}" ]]; then
+    echo "Environment file not found: ${ENV_FILE}" >&2
     exit 1
 fi
 
-# Ensure SSH key exists and add it to the agent
-function ensure_ssh_key() {
-    if [ ! -f "$SSH_KEY_PATH" ]; then
-        echo "SSH key not found at $SSH_KEY_PATH."
-        echo "Generating a new SSH key..."
-        mkdir -p "$(dirname \"$SSH_KEY_PATH\")"
-        ssh-keygen -t rsa -b 4096 -C "$SSH_KEY_EMAIL" -f "$SSH_KEY_PATH" -N ""
-        echo "SSH key generated."
+# shellcheck source=/dev/null
+source "${ENV_FILE}"
 
-        echo "Please add the following public key to your GitHub repository as a deploy key:"
-        cat "${SSH_KEY_PATH}.pub"
-        echo "Visit https://github.com/GithubUSER/repoSITEcom/settings/keys to add the key."
-        echo "Re-run the script after adding the key."
+REQUIRED_VARS=(
+    FTPS_SERVER FTPS_USER FTPS_PASS FTPS_REMOTE_DIR
+    LOCAL_REPO SSH_KEY_PATH
+    GIT_REMOTE_URL GIT_USER_NAME GIT_USER_EMAIL BRANCH
+)
+for var in "${REQUIRED_VARS[@]}"; do
+    if [[ -z "${!var:-}" ]]; then
+        echo "Missing required env var: ${var}" >&2
         exit 1
     fi
+done
 
-    echo "SSH key found at $SSH_KEY_PATH. Proceeding..."
-    eval "$(ssh-agent -s)"
-    ssh-add "$SSH_KEY_PATH" </dev/null
+# Optional tuning (with defaults)
+SSH_KEY_EMAIL="${SSH_KEY_EMAIL:-${GIT_USER_EMAIL}}"
+FTPS_PARALLEL="${FTPS_PARALLEL:-2}"
+ALLOW_FORCE_PUSH="${ALLOW_FORCE_PUSH:-0}"   # set to 1 to permit --force fallback
+
+SSH_AUTH_SOCK_FILE=""
+SSH_AGENT_PID_FILE=""
+
+cleanup() {
+    # Kill the ssh-agent we started, if any.
+    if [[ -n "${SSH_AGENT_PID:-}" ]] && kill -0 "${SSH_AGENT_PID}" 2>/dev/null; then
+        kill "${SSH_AGENT_PID}" 2>/dev/null || true
+    fi
 }
+trap cleanup EXIT
 
-# Ensure Git repository is valid and properly configured
-function ensure_git_repo() {
-    if [ ! -d "$LOCAL_REPO" ]; then
-        echo "$LOCAL_REPO does not exist. Cloning the repository..."
-        git clone "$GIT_REMOTE_URL" "$LOCAL_REPO"
+log()  { printf '[%s] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"; }
+die()  { log "ERROR: $*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# SSH key + agent
+# ---------------------------------------------------------------------------
+ensure_ssh_key() {
+    if [[ ! -f "${SSH_KEY_PATH}" ]]; then
+        log "SSH key not found at ${SSH_KEY_PATH}. Generating a new ed25519 key..."
+        mkdir -p "$(dirname -- "${SSH_KEY_PATH}")"
+        chmod 700 "$(dirname -- "${SSH_KEY_PATH}")"
+        ssh-keygen -t ed25519 -C "${SSH_KEY_EMAIL}" -f "${SSH_KEY_PATH}" -N ""
+        log "Key generated. Add the following public key as a deploy key on your Git host:"
+        cat "${SSH_KEY_PATH}.pub"
+        die "Re-run the script after adding the deploy key."
     fi
 
-    cd "$LOCAL_REPO" || exit 1
+    log "Using SSH key ${SSH_KEY_PATH}"
+    # Start a script-scoped ssh-agent so the trap can tear it down.
+    eval "$(ssh-agent -s)" >/dev/null
+    ssh-add "${SSH_KEY_PATH}" </dev/null
+}
 
-    if [ ! -d ".git" ]; then
-        echo ".git directory is missing. Restoring Git repository..."
+# ---------------------------------------------------------------------------
+# Git working copy
+# ---------------------------------------------------------------------------
+ensure_git_repo() {
+    if [[ ! -d "${LOCAL_REPO}" ]]; then
+        log "${LOCAL_REPO} does not exist. Cloning..."
+        git clone --branch "${BRANCH}" "${GIT_REMOTE_URL}" "${LOCAL_REPO}"
+    fi
+
+    cd "${LOCAL_REPO}"
+
+    if [[ ! -d .git ]]; then
+        log ".git directory missing; re-initializing and attaching to origin..."
         git init
-        git remote add origin "$GIT_REMOTE_URL"
-        git fetch origin "$BRANCH"
-        git checkout -b "$BRANCH" --track origin/"$BRANCH" || git checkout -b "$BRANCH"
+        git remote add origin "${GIT_REMOTE_URL}" 2>/dev/null || \
+            git remote set-url origin "${GIT_REMOTE_URL}"
+        git fetch origin "${BRANCH}"
+        git checkout -B "${BRANCH}" --track "origin/${BRANCH}"
     else
-        git checkout "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH"
-        git pull origin "$BRANCH" || echo "Failed to pull from remote."
+        git fetch origin "${BRANCH}"
+        git checkout -B "${BRANCH}" "origin/${BRANCH}" 2>/dev/null || git checkout -B "${BRANCH}"
+        git pull --ff-only origin "${BRANCH}" || log "Fast-forward pull failed; continuing."
     fi
 
-    # Configure Git user information
-    git config user.name "$GIT_USER_NAME"
-    git config user.email "$GIT_USER_EMAIL"
+    git config user.name  "${GIT_USER_NAME}"
+    git config user.email "${GIT_USER_EMAIL}"
 }
 
-# Download files via FTPS, excluding the .git directory and its contents
-function download_ftps() {
-    echo "Starting FTPS download..."
+# ---------------------------------------------------------------------------
+# FTPS download (staging → rsync into working copy)
+# ---------------------------------------------------------------------------
+download_ftps() {
+    command -v lftp  >/dev/null 2>&1 || die "lftp is required."
+    command -v rsync >/dev/null 2>&1 || die "rsync is required."
 
-    lftp -u "$FTPS_USER","$FTPS_PASS" ftps://"$FTPS_SERVER" <<EOF
-mirror --verbose --continue --delete --parallel=2 \
---exclude-glob ".git" --exclude-glob ".git/**" --exclude-glob ".ssh*" \
-"$FTPS_REMOTE_DIR" "$LOCAL_REPO"
+    local staging
+    staging="$(mktemp -d -t sitesync.XXXXXX)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '${staging}'" RETURN
+
+    log "Mirroring FTPS → staging at ${staging}"
+    # Password comes from LFTP_PASSWORD so it never appears in the process table.
+    LFTP_PASSWORD="${FTPS_PASS}" lftp -u "${FTPS_USER}" --env-password "ftps://${FTPS_SERVER}" <<EOF
+set ssl:verify-certificate yes
+set net:max-retries 3
+set net:timeout 30
+mirror --verbose --continue --delete --parallel=${FTPS_PARALLEL} \
+       --exclude-glob .git --exclude-glob .git/* \
+       --exclude-glob .ssh --exclude-glob .ssh/* \
+       "${FTPS_REMOTE_DIR}" "${staging}"
 quit
 EOF
 
-    if [ $? -ne 0 ]; then
-        echo "Error: FTPS download failed."
-        exit 1
-    fi
+    log "Syncing staging → working copy (preserving .git)"
+    rsync -a --delete \
+        --exclude='.git' --exclude='.git/**' \
+        --exclude='.ssh' --exclude='.ssh/**' \
+        "${staging}/" "${LOCAL_REPO}/"
 }
 
-# Perform Git operations
-function perform_git_operations() {
-    echo "Performing Git operations..."
-    cd "$LOCAL_REPO" || exit 1
+# ---------------------------------------------------------------------------
+# Git commit + push
+# ---------------------------------------------------------------------------
+perform_git_operations() {
+    cd "${LOCAL_REPO}"
 
-    # Add and commit any new changes
     git add --all
-    git commit -m "Automated update from FTPS $(date)" || echo "No changes to commit."
-
-    # Pull latest changes from remote, preferring our local changes in conflicts
-    git pull origin "$BRANCH" --strategy=recursive -X ours --no-edit || echo "Pull failed, attempting to continue."
-
-    # Push changes to the remote repository
-    git push origin "$BRANCH" || {
-        echo "Standard push failed. Force pushing to remote repository..."
-        git push --force origin "$BRANCH"
-    }
-}
-
-# Skip FTPS if a key is pressed
-function maybe_skip_ftps() {
-    echo "Press any key to skip the FTPS download, or wait 5 seconds to continue."
-    read -t 5 -n 1 SKIP </dev/tty
-    EXIT_STATUS=$?
-    if [ $EXIT_STATUS -eq 0 ]; then
-        echo -e "\nSkipping FTPS download..."
+    if git diff --cached --quiet; then
+        log "No changes to commit."
         return 0
-    else
-        echo -e "\nProceeding with FTPS download..."
+    fi
+
+    git commit -m "Automated update from FTPS $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+    # Prefer fast-forward rebase over the previous "-X ours" merge,
+    # which silently discards remote changes.
+    if ! git pull --rebase origin "${BRANCH}"; then
+        log "Rebase failed; aborting so you can resolve conflicts manually."
+        git rebase --abort 2>/dev/null || true
         return 1
     fi
+
+    if git push origin "${BRANCH}"; then
+        log "Push succeeded."
+        return 0
+    fi
+
+    if [[ "${ALLOW_FORCE_PUSH}" == "1" ]]; then
+        log "Standard push failed. ALLOW_FORCE_PUSH=1 set — force-pushing with --force-with-lease."
+        git push --force-with-lease origin "${BRANCH}"
+    else
+        die "Push failed. Set ALLOW_FORCE_PUSH=1 to allow --force-with-lease fallback."
+    fi
 }
 
-# Main execution
-cd "$SCRIPT_DIR"  # Change to script directory
-ensure_ssh_key
-ensure_git_repo
+# ---------------------------------------------------------------------------
+# Skip prompt
+# ---------------------------------------------------------------------------
+maybe_skip_ftps() {
+    if [[ ! -t 0 ]]; then
+        # Non-interactive: never skip.
+        return 1
+    fi
+    echo "Press any key within 5 seconds to SKIP the FTPS download."
+    if read -r -t 5 -n 1 _ </dev/tty; then
+        echo
+        log "Skipping FTPS download."
+        return 0
+    fi
+    echo
+    return 1
+}
 
-if ! maybe_skip_ftps; then
-    download_ftps
-else
-    echo "FTPS download skipped."
-fi
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+main() {
+    ensure_ssh_key
+    ensure_git_repo
 
-perform_git_operations
-echo "Sync completed successfully."
+    if maybe_skip_ftps; then
+        log "FTPS download skipped by user."
+    else
+        download_ftps
+    fi
+
+    perform_git_operations
+    log "Sync completed successfully."
+}
+
+main "$@"

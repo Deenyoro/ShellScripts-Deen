@@ -1,36 +1,45 @@
-# Function to format the script
-function Format-Script {
-    param (
-        [string]$InputScript,
-        [string]$OutputScript
-    )
+<#
+.SYNOPSIS
+    Insert a blank line before each `function` or comment block in a
+    PowerShell script, without ever producing two blank lines in a row.
 
-    # Read the content of the script
-    $content = Get-Content $InputScript
+.EXAMPLE
+    .\CodeLineSpacingFix.ps1 -InputScript .\myscript.ps1
+#>
 
-    # Initialize a new array to store the formatted content
-    $formattedContent = @()
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory)][string]$InputScript,
+    [string]$OutputScript
+)
 
-    # Process each line
-    foreach ($line in $content) {
-        if ($line -match "^function") {
-            $formattedContent += ""
-        }
-        if ($line -match "^#") {
-            $formattedContent += ""
-        }
-        $formattedContent += $line
-    }
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 
-    # Write the formatted content to the output file
-    $formattedContent | Out-File -FilePath $OutputScript -Encoding utf8
-
-    Write-Output "Formatting complete. Output written to $OutputScript"
+if (-not (Test-Path -LiteralPath $InputScript)) {
+    throw "Input file not found: $InputScript"
 }
 
-# Prompt user for the script name
-$inputScript = Read-Host "Enter the name of the input script"
-$outputScript = [System.IO.Path]::ChangeExtension($inputScript, "spacing" + [System.IO.Path]::GetExtension($inputScript))
+if (-not $OutputScript) {
+    $dir  = [IO.Path]::GetDirectoryName((Resolve-Path $InputScript).Path)
+    $name = [IO.Path]::GetFileNameWithoutExtension($InputScript)
+    $ext  = [IO.Path]::GetExtension($InputScript)
+    $OutputScript = Join-Path $dir "$name.spacing$ext"
+}
 
-# Call the function to format the script
-Format-Script -InputScript $inputScript -OutputScript $outputScript
+$lines = Get-Content -LiteralPath $InputScript
+$out = New-Object System.Collections.Generic.List[string]
+
+foreach ($line in $lines) {
+    $wantsBlankBefore = $line -match '^\s*(function\b|#)'
+    $lastLineBlank = ($out.Count -gt 0) -and [string]::IsNullOrWhiteSpace($out[$out.Count - 1])
+    $firstLine = $out.Count -eq 0
+
+    if ($wantsBlankBefore -and -not $lastLineBlank -and -not $firstLine) {
+        $out.Add('')
+    }
+    $out.Add($line)
+}
+
+Set-Content -LiteralPath $OutputScript -Value $out -Encoding UTF8
+Write-Host "Wrote $($out.Count) lines to $OutputScript"

@@ -1,103 +1,138 @@
-# This script assumes you are running it with administrative privileges
+<#
+.SYNOPSIS
+    Prep a domain-joined machine for Azure AD / Autopilot migration:
+      1. (Optional) create a local admin account.
+      2. (Optional) scrub Duo registry keys.
+      3. (Optional) unjoin the on-prem domain and reboot.
 
-# Function to get secure password input
-function Get-SecurePassword {
-    param (
-        [string]$prompt = "Enter password: "
-    )
-    $SecureString = Read-Host -Prompt $prompt -AsSecureString
-    return $SecureString
-}
+.NOTES
+    Must run elevated. If you enter a blank password for the new local admin
+    you will be re-prompted; the "Pass1!Word" default from the previous
+    revision was a security footgun and has been removed.
+#>
 
-# Function to get yes or no input
-function Get-YesOrNo {
-    param (
-        [string]$prompt
-    )
-    do {
-        $input = Read-Host -Prompt $prompt
-    } while ($input -ne 'Y' -and $input -ne 'N')
-    return $input
-}
+#Requires -RunAsAdministrator
+[CmdletBinding()]
+param()
 
-# Function to get input with a default value
-function Get-InputWithDefault {
-    param (
-        [string]$prompt,
-        [string]$default
-    )
-    $input = Read-Host -Prompt "$prompt (Default: $default)"
-    if ($input -eq "") {
-        return $default
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+# --- Helpers ---------------------------------------------------------------
+
+function Read-NonEmptySecureString {
+    param([Parameter(Mandatory)][string]$Prompt)
+    while ($true) {
+        $secure = Read-Host -Prompt $Prompt -AsSecureString
+        # Length > 0 means at least one character was entered.
+        if ($secure.Length -gt 0) { return $secure }
+        Write-Warning 'Password cannot be empty.'
     }
-    return $input
 }
 
-# Variables for domain credentials
-$username = Read-Host -Prompt "Enter your domain username (format: DOMAIN\username)"
-$password = Get-SecurePassword -Prompt "Enter your domain password"
-$credential = New-Object System.Management.Automation.PSCredential($username, $password)
-
-# Ask to create local admin account
-$createLocalAdmin = Get-YesOrNo -prompt "Do you want to create a local admin account? (Y/N)"
-if ($createLocalAdmin -eq 'Y') {
-    $localAdminUsername = Get-InputWithDefault -prompt "Enter the new local admin username" -default "Admin"
-    $localAdminPassword = Get-SecurePassword -Prompt "Enter the new local admin password (Default: Pass1!Word)"
-    
-    if ($localAdminPassword.Length -eq 0) {
-        $localAdminPassword = ConvertTo-SecureString "Pass1!Word" -AsPlainText -Force
+function Read-YesNo {
+    param([Parameter(Mandatory)][string]$Prompt)
+    while ($true) {
+        $answer = (Read-Host "$Prompt (Y/N)").Trim().ToUpperInvariant()
+        if ($answer -eq 'Y') { return $true }
+        if ($answer -eq 'N') { return $false }
     }
-    
-    Write-Host "Creating local admin account..."
-    $localAdminAccount = New-LocalUser -Name $localAdminUsername -Password $localAdminPassword -FullName "Local Administrator" -Description "Local admin account" -UserMayNotChangePassword -PasswordNeverExpires
-    Add-LocalGroupMember -Group "Administrators" -Member $localAdminAccount.Name
-    Write-Host "Local admin account created."
 }
 
-# Ask to remove Duo registry keys
-$removeDuo = Get-YesOrNo -prompt "Do you want to remove Duo registry keys? (Y/N)"
-if ($removeDuo -eq 'Y') {
-    $duoRegistryPaths = @(
-        "HKLM:\Software\Wow6432Node\Duo Security",
-        "HKLM:\Software\Duo Security",
-        "HKCU:\Software\Duo Security"
+function Read-WithDefault {
+    param(
+        [Parameter(Mandatory)][string]$Prompt,
+        [Parameter(Mandatory)][string]$Default
     )
-    
-    foreach ($path in $duoRegistryPaths) {
+    $answer = Read-Host "$Prompt (Default: $Default)"
+    if ([string]::IsNullOrWhiteSpace($answer)) { return $Default }
+    return $answer
+}
+
+# --- Gather credential for the unjoin (only if we're going to unjoin) ------
+
+function Get-DomainCredential {
+    $username = Read-Host 'Domain username for unjoin (DOMAIN\user)'
+    $password = Read-NonEmptySecureString -Prompt 'Domain password'
+    return [System.Management.Automation.PSCredential]::new($username, $password)
+}
+
+# --- Step: local admin -----------------------------------------------------
+
+function New-LocalAdminAccount {
+    $userName = Read-WithDefault -Prompt 'New local admin username' -Default 'Admin'
+
+    if (Get-LocalUser -Name $userName -ErrorAction SilentlyContinue) {
+        Write-Warning "Local user '$userName' already exists. Skipping creation."
+        return
+    }
+
+    $password = Read-NonEmptySecureString -Prompt "New local admin password for '$userName'"
+
+    Write-Host "Creating local admin account '$userName'..."
+    $null = New-LocalUser -Name $userName -Password $password `
+        -FullName 'Local Administrator' -Description 'Local admin account' `
+        -UserMayNotChangePassword -PasswordNeverExpires
+    Add-LocalGroupMember -Group 'Administrators' -Member $userName
+    Write-Host "Local admin account '$userName' created."
+}
+
+# --- Step: Duo cleanup -----------------------------------------------------
+
+function Remove-DuoRegistryKey {
+    $paths = @(
+        'HKLM:\Software\Wow6432Node\Duo Security'
+        'HKLM:\Software\Duo Security'
+        'HKCU:\Software\Duo Security'
+    )
+
+    foreach ($path in $paths) {
         if (Test-Path $path) {
             try {
                 Remove-Item $path -Recurse -Force
-                Write-Host "Removed Duo registry entry at $path"
+                Write-Host "Removed $path"
             } catch {
-                Write-Host "Failed to remove Duo registry entry at ${path}: $($_.Exception.Message)"
+                Write-Warning "Failed to remove ${path}: $($_.Exception.Message)"
             }
-        } else {
-            Write-Host "No Duo registry entry found at $path"
         }
     }
 
+    # Catch any stragglers under Software\* named like *Duo*.
     try {
-        $duoRelatedEntries = Get-ChildItem -Path HKLM:\Software, HKCU:\Software -Recurse -ErrorAction SilentlyContinue | Where-Object { $_.PSPath -like "*Duo*" }
-        
-        foreach ($entry in $duoRelatedEntries) {
-            try {
-                Remove-Item $entry.PSPath -Recurse -Force
-                Write-Host "Removed Duo-related registry entry at $($entry.PSPath)"
-            } catch {
-                Write-Host "Failed to remove Duo-related registry entry at $($entry.PSPath): $($_.Exception.Message)"
+        Get-ChildItem -Path 'HKLM:\Software','HKCU:\Software' -ErrorAction SilentlyContinue |
+            Where-Object { $_.PSChildName -like '*Duo*' } |
+            ForEach-Object {
+                try {
+                    Remove-Item $_.PSPath -Recurse -Force
+                    Write-Host "Removed $($_.PSPath)"
+                } catch {
+                    Write-Warning "Failed to remove $($_.PSPath): $($_.Exception.Message)"
+                }
             }
-        }
     } catch {
-        Write-Host "Failed to enumerate Duo-related registry entries: $($_.Exception.Message)"
+        Write-Warning "Duo sweep failed: $($_.Exception.Message)"
     }
 }
 
-# Ask to unjoin the domain and restart
-$unjoinDomain = Get-YesOrNo -prompt "Do you want to unjoin the domain and restart? (Y/N)"
-if ($unjoinDomain -eq 'Y') {
-    Write-Host "Unjoining from on-premises domain..."
-    Remove-Computer -UnjoinDomainCredential $credential -Force -Restart
+# --- Step: unjoin ----------------------------------------------------------
 
-    # The system will restart after this command
-    # The script must be restarted manually after reboot to continue
+function Invoke-DomainUnjoin {
+    param([Parameter(Mandatory)][pscredential]$Credential)
+    Write-Host 'Unjoining on-prem domain. The machine will restart.'
+    Remove-Computer -UnjoinDomainCredential $Credential -Force -Restart
+}
+
+# --- Orchestration ---------------------------------------------------------
+
+if (Read-YesNo 'Create a local admin account?') {
+    New-LocalAdminAccount
+}
+
+if (Read-YesNo 'Remove Duo registry keys?') {
+    Remove-DuoRegistryKey
+}
+
+if (Read-YesNo 'Unjoin the domain and restart now?') {
+    $cred = Get-DomainCredential
+    Invoke-DomainUnjoin -Credential $cred
 }

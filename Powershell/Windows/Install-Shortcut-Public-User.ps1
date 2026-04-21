@@ -1,110 +1,56 @@
-# Install-PublicShortcut.ps1
+<#
+.SYNOPSIS
+    Install a Help Desk .url shortcut on the machine-wide / Public desktop.
 
-# -------------------------------
-# Configuration
-# -------------------------------
+.NOTES
+    Must run elevated (or as SYSTEM via Intune). The Public desktop path is
+    resolved through the known-folder API, so it works on relocated
+    installs too.
+#>
 
-# Define the log directory and file
-$LogDir = "C:\MDM"
-$LogFile = Join-Path -Path $LogDir -ChildPath "public_helpdesk_install.log"
+#Requires -RunAsAdministrator
+[CmdletBinding()]
+param(
+    [string]$ShortcutName = 'EMAIL HELP@PLACEHOLDER.COM OR CALL 4125555555.url',
+    [string]$TargetUrl    = 'https://help.PLACEHOLDER.com',
+    [string]$IconPath     = (Join-Path $PSScriptRoot 'help-desk.ico'),
+    [string]$LogDirectory = 'C:\MDM'
+)
 
-# Define the shortcut properties
-$ShortcutName = "EMAIL HELP@PLACEHOLDER.COM OR CALL 4125555555.url"
-$TargetURL = "https://help.PLACEHOLDER.com"
-$IconPath = "$PSScriptRoot\help-desk.ico"
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 
-# Define the Public Desktop path
-$PublicDesktopPath = "C:\Users\Public\Desktop"
-$PublicShortcutPath = Join-Path -Path $PublicDesktopPath -ChildPath $ShortcutName
-
-# -------------------------------
-# Functions
-# -------------------------------
-
-# Function to log messages
-function Log-Message {
-    param (
-        [string]$Message
-    )
-    Write-Output $Message
+if (-not (Test-Path -LiteralPath $LogDirectory)) {
+    New-Item -Path $LogDirectory -ItemType Directory -Force | Out-Null
 }
+Start-Transcript -Path (Join-Path $LogDirectory 'public_helpdesk_install.log') -Append | Out-Null
 
-# Function to create a .url shortcut
-function Create-UrlShortcut {
-    param (
-        [string]$ShortcutPath,
-        [string]$URL,
-        [string]$IconPath
-    )
-    try {
-        $ShortcutContent = "[InternetShortcut]`nURL=$URL`nIconFile=$IconPath`nIconIndex=0"
-        Set-Content -Path $ShortcutPath -Value $ShortcutContent -Encoding ASCII
-        return $true
-    } catch {
-        Log-Message "Failed to create URL shortcut at $ShortcutPath. Error: $_"
-        return $false
-    }
-}
-
-# -------------------------------
-# Script Execution
-# -------------------------------
-
-# Ensure the log directory exists
-if (-Not (Test-Path -Path $LogDir)) {
-    try {
-        New-Item -Path $LogDir -ItemType Directory -Force | Out-Null
-    } catch {
-        Write-Host "Failed to create log directory at $LogDir. Error: $_"
-        Exit 1
-    }
-}
-
-# Start logging
-Start-Transcript -Path $LogFile -Append
-
-Log-Message "Starting Public Desktop shortcut installation."
-
-# Verify the icon file exists
-if (-Not (Test-Path -Path $IconPath)) {
-    Log-Message "Icon file not found at $IconPath. Exiting script."
-    Stop-Transcript
-    Exit 1
-}
-
-# Verify Public Desktop path exists
-if (-Not (Test-Path -Path $PublicDesktopPath)) {
-    Log-Message "Public Desktop path not found at $PublicDesktopPath. Attempting to create it."
-    try {
-        New-Item -Path $PublicDesktopPath -ItemType Directory -Force | Out-Null
-        Log-Message "Created Public Desktop folder at $PublicDesktopPath."
-    } catch {
-        Log-Message "Failed to create Public Desktop folder at $PublicDesktopPath. Error: $_"
-        Stop-Transcript
-        Exit 1
-    }
-}
-
-# Create the shortcut if it doesn't exist
 try {
-    if (-Not (Test-Path -Path $PublicShortcutPath)) {
-        Log-Message "Creating Help Desk shortcut in Public Desktop."
-
-        $Created = Create-UrlShortcut -ShortcutPath $PublicShortcutPath -URL $TargetURL -IconPath $IconPath
-
-        if ($Created) {
-            Log-Message "Help Desk shortcut created successfully in Public Desktop."
-        } else {
-            Log-Message "Failed to create Help Desk shortcut in Public Desktop."
-        }
-    } else {
-        Log-Message "Help Desk shortcut already exists in Public Desktop. Skipping."
+    $publicDesktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+    if (-not (Test-Path -LiteralPath $publicDesktop)) {
+        New-Item -Path $publicDesktop -ItemType Directory -Force | Out-Null
     }
-} catch {
-    Log-Message "An unexpected error occurred while creating the Public Desktop shortcut. Error: $_"
+
+    $shortcut = Join-Path $publicDesktop $ShortcutName
+    if (Test-Path -LiteralPath $shortcut) {
+        Write-Host "Shortcut already present: $shortcut"
+        return
+    }
+
+    if (-not (Test-Path -LiteralPath $IconPath)) {
+        Write-Warning "Icon file not found at $IconPath; shortcut will use the default globe icon."
+        $IconPath = $null
+    }
+
+    $content = "[InternetShortcut]`r`nURL=$TargetUrl"
+    if ($IconPath) { $content += "`r`nIconFile=$IconPath`r`nIconIndex=0" }
+
+    Set-Content -LiteralPath $shortcut -Value $content -Encoding ASCII
+    Write-Host "Created $shortcut"
 }
-
-# Stop logging
-Stop-Transcript
-
-Log-Message "Public Desktop shortcut installation completed."
+catch {
+    Write-Error "Public-desktop install failed: $($_.Exception.Message)"
+    Stop-Transcript | Out-Null
+    exit 1
+}
+Stop-Transcript | Out-Null

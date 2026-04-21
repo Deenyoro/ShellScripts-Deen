@@ -1,494 +1,475 @@
-# SonicWall .exp to Human-Readable Config Converter
-# Comprehensive migration export - captures all user-configured settings
-# Usage: .\sonicwall_exp_converter.ps1 -InputFile "path\to\file.exp" -OutputFile "path\to\output.txt"
+﻿<#
+.SYNOPSIS
+    Convert a SonicWall .exp backup (base64 of URL-encoded key=value pairs)
+    into a human-readable migration-oriented summary.
 
+.DESCRIPTION
+    Captures zones, interfaces, DNS, address / service objects and groups,
+    DHCP scopes and static leases, DHCP options, NAT, firewall rules,
+    routing, IPsec + SSL VPN, and schedules. System defaults are filtered
+    out so the output is what a tech would re-enter on a replacement unit.
+
+.EXAMPLE
+    .\sonicwall_exp_converter.ps1 -InputFile .\sonicwall.exp -OutputFile .\config.txt
+#>
+
+[CmdletBinding()]
 param(
-    [string]$InputFile = "C:\Users\DeanThomas\Downloads\sonicwall-TZ_300-6_5_4_15-117n-1767571633.exp",
-    [string]$OutputFile = "C:\Users\DeanThomas\Downloads\sonicwall_essential_config.txt"
+    [Parameter(Mandatory)]
+    [ValidateScript({ Test-Path -LiteralPath $_ })]
+    [string]$InputFile,
+
+    [string]$OutputFile
 )
 
-Add-Type -AssemblyName System.Web
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 
-Write-Host "Reading and decoding $InputFile..."
+if (-not $OutputFile) {
+    $OutputFile = [IO.Path]::ChangeExtension($InputFile, 'txt')
+}
 
-# Read and decode base64
-$content = (Get-Content $InputFile -Raw).Trim().TrimEnd('&')
-$decoded = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($content))
+# --- Decode ----------------------------------------------------------------
+Write-Host "Reading $InputFile..."
+$raw = (Get-Content -LiteralPath $InputFile -Raw).Trim().TrimEnd('&')
+try {
+    $decoded = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($raw))
+} catch {
+    throw "File does not look like a base64-encoded SonicWall export: $($_.Exception.Message)"
+}
 
-# Parse into key=value pairs
-$lines = $decoded -split '&'
 $config = @{}
-foreach ($line in $lines) {
-    $decodedLine = [System.Web.HttpUtility]::UrlDecode($line)
-    if ($decodedLine -match "^(.+?)=(.*)$") {
-        $config[$matches[1]] = $matches[2]
+foreach ($pair in ($decoded -split '&')) {
+    $pairDec = [uri]::UnescapeDataString($pair)
+    if ($pairDec -match '^(?<k>[^=]+)=(?<v>.*)$') {
+        $config[$Matches.k] = $Matches.v
     }
 }
+Write-Host "Parsed $($config.Count) parameters."
 
-Write-Host "Parsed $($config.Count) configuration parameters"
+# --- Output (StringBuilder = O(n) vs $array+= at O(n^2)) -------------------
+$sb = New-Object System.Text.StringBuilder
 
-$output = @()
-
-function Add-Section($title) {
-    $script:output += ""
-    $script:output += "=" * 80
-    $script:output += $title
-    $script:output += "=" * 80
+function Add-Line { param([string]$Text='') [void]$sb.AppendLine($Text) }
+function Add-Section {
+    param([Parameter(Mandatory)][string]$Title)
+    Add-Line ''
+    Add-Line ('=' * 80)
+    Add-Line $Title
+    Add-Line ('=' * 80)
 }
 
-$output += "================================================================================"
-$output += "SONICWALL CONFIGURATION EXPORT - ESSENTIAL FOR MIGRATION"
-$output += "Firmware: $($config['buildNum'])"
-$output += "Device: $($config['shortProdName'])"
-$output += "================================================================================"
-
-#region ZONES
-Add-Section "ZONES"
-$zoneIds = $config.Keys | Where-Object { $_ -match "^zoneObjId_\d+$" } | Sort-Object { [int]($_ -replace '\D', '') }
-foreach ($zid in $zoneIds) {
-    $idx = $zid -replace '\D', ''
-    $name = $config["zoneObjId_$idx"]
-    $type = $config["zoneObjZoneType_$idx"]
-    $typeDesc = switch($type) { "0" {"Untrusted"} "1" {"Trusted"} "2" {"Public"} "3" {"Wireless"} "4" {"Encrypted"} "5" {"SSLVPN"} default {"Type $type"} }
-    $output += "Zone: $name ($typeDesc)"
+function Get-IndexedKey {
+    param([Parameter(Mandatory)][string]$Pattern)
+    # Returns the numeric suffixes from keys matching Pattern (which must contain `(\d+)`).
+    $config.Keys |
+        Where-Object { $_ -match $Pattern } |
+        ForEach-Object { [int]($_ -replace '\D','') } |
+        Sort-Object -Unique
 }
-#endregion
 
-#region INTERFACES
-Add-Section "INTERFACES"
-$ifaceNums = @()
-$config.Keys | Where-Object { $_ -match "^iface_name_(\d+)$" } | ForEach-Object {
-    if ($_ -match "^iface_name_(\d+)$") { $ifaceNums += $matches[1] }
+function Get-Val {
+    param([Parameter(Mandatory)][string]$Key)
+    if ($config.ContainsKey($Key)) { return $config[$Key] }
+    return $null
 }
-foreach ($num in ($ifaceNums | Sort-Object { [int]$_ })) {
-    $name = $config["iface_name_$num"]
-    $comment = $config["iface_comment_$num"]
-    $ip = $config["iface_static_ip_$num"]
-    $mask = $config["iface_static_mask_$num"]
-    $gateway = $config["iface_static_gateway_$num"]
-    $zone = $config["iface_zone_$num"]
-    $mode = $config["iface_mode_$num"]
-    $vlan = $config["iface_vlanId_$num"]
-    $mtu = $config["iface_mtu_$num"]
-    $mgmt = $config["iface_mgmt_$num"]
-    $modeDesc = switch($mode) { "0" {"Static"} "1" {"DHCP"} "2" {"PPPoE"} "3" {"PPTP"} "4" {"L2TP"} default {"Mode $mode"} }
 
-    if ($name -or $ip -or $comment) {
-        $output += "Interface ${num}: $name"
-        if ($comment) { $output += "  Description: $comment" }
-        if ($zone) { $output += "  Zone: $zone" }
-        if ($mode) { $output += "  Mode: $modeDesc" }
-        if ($ip -and $ip -ne "0.0.0.0") { $output += "  IP Address: $ip" }
-        if ($mask -and $mask -ne "0.0.0.0") { $output += "  Subnet Mask: $mask" }
-        if ($gateway -and $gateway -ne "0.0.0.0") { $output += "  Gateway: $gateway" }
-        if ($vlan -and $vlan -ne "0") { $output += "  VLAN ID: $vlan" }
-        if ($mtu -and $mtu -ne "1500" -and $mtu -ne "0") { $output += "  MTU: $mtu" }
-        $output += ""
+# --- Header ----------------------------------------------------------------
+Add-Line ('=' * 80)
+Add-Line 'SONICWALL CONFIGURATION EXPORT - ESSENTIAL FOR MIGRATION'
+Add-Line "Firmware: $(Get-Val 'buildNum')"
+Add-Line "Device:   $(Get-Val 'shortProdName')"
+Add-Line ('=' * 80)
+
+# --- Zones -----------------------------------------------------------------
+Add-Section 'ZONES'
+foreach ($i in (Get-IndexedKey '^zoneObjId_\d+$')) {
+    $name = Get-Val "zoneObjId_$i"
+    $type = Get-Val "zoneObjZoneType_$i"
+    $desc = switch ($type) {
+        '0' {'Untrusted'} '1' {'Trusted'} '2' {'Public'}
+        '3' {'Wireless'}  '4' {'Encrypted'} '5' {'SSLVPN'}
+        default {"Type $type"}
+    }
+    Add-Line "Zone: $name ($desc)"
+}
+
+# --- Interfaces ------------------------------------------------------------
+Add-Section 'INTERFACES'
+$ifaceIds = Get-IndexedKey '^iface_name_\d+$'
+foreach ($i in $ifaceIds) {
+    $name    = Get-Val "iface_name_$i"
+    $comment = Get-Val "iface_comment_$i"
+    $ip      = Get-Val "iface_static_ip_$i"
+    $mask    = Get-Val "iface_static_mask_$i"
+    $gw      = Get-Val "iface_static_gateway_$i"
+    $zone    = Get-Val "iface_zone_$i"
+    $mode    = Get-Val "iface_mode_$i"
+    $vlan    = Get-Val "iface_vlanId_$i"
+    $mtu     = Get-Val "iface_mtu_$i"
+    $modeDesc = switch ($mode) {
+        '0' {'Static'} '1' {'DHCP'} '2' {'PPPoE'}
+        '3' {'PPTP'}   '4' {'L2TP'}
+        default {"Mode $mode"}
+    }
+
+    if (-not ($name -or $ip -or $comment)) { continue }
+    Add-Line "Interface ${i}: $name"
+    if ($comment)                         { Add-Line "  Description: $comment" }
+    if ($zone)                            { Add-Line "  Zone: $zone" }
+    if ($mode)                            { Add-Line "  Mode: $modeDesc" }
+    if ($ip   -and $ip   -ne '0.0.0.0')   { Add-Line "  IP Address: $ip" }
+    if ($mask -and $mask -ne '0.0.0.0')   { Add-Line "  Subnet Mask: $mask" }
+    if ($gw   -and $gw   -ne '0.0.0.0')   { Add-Line "  Gateway: $gw" }
+    if ($vlan -and $vlan -ne '0')         { Add-Line "  VLAN ID: $vlan" }
+    if ($mtu  -and $mtu -notin '1500','0'){ Add-Line "  MTU: $mtu" }
+    Add-Line
+}
+
+# --- DNS -------------------------------------------------------------------
+Add-Section 'DNS SETTINGS'
+Add-Line "DNS Server 1: $(Get-Val 'dns_server_one')"
+Add-Line "DNS Server 2: $(Get-Val 'dns_server_two')"
+Add-Line "DNS Server 3: $(Get-Val 'dns_server_three')"
+if ((Get-Val 'dnsProxy_enable')      -eq 'on') { Add-Line 'DNS Proxy: Enabled' }
+if ((Get-Val 'dnsProxySplit_enable') -eq 'on') { Add-Line 'Split DNS: Enabled' }
+
+# --- Address objects -------------------------------------------------------
+Add-Section 'ADDRESS OBJECTS (Custom)'
+$systemRx = '^(Default|Firewalled|.*Subnets$|.*Interface IP$|All .*|.*Primary.*|U\d+ |.*Enforcement.*|RBL.*|Public Mail.*|Node License.*|Dial-Up.*|SonicPoints|X\d+ (IP|Subnet|Default))'
+foreach ($i in (Get-IndexedKey '^addrObjId_\d+$')) {
+    $name = Get-Val "addrObjId_$i"
+    $type = Get-Val "addrObjType_$i"
+    $zone = Get-Val "addrObjZone_$i"
+    $ip1  = Get-Val "addrObjIp1_$i"
+    $ip2  = Get-Val "addrObjIp2_$i"
+    $fqdn = Get-Val "addrObjFqdn_$i"
+    $typeDesc = switch ($type) {
+        '1' {'Host'} '2' {'Range'} '4' {'Network'} '8' {'MAC'} '16' {'FQDN'}
+        default {"Type $type"}
+    }
+    if (-not $name) { continue }
+    if ($name -match $systemRx) { continue }
+    $hasData = ($ip1 -and $ip1 -ne '0.0.0.0') -or $fqdn
+    if (-not $hasData) { continue }
+
+    Add-Line "Name: $name"
+    Add-Line "  Type: $typeDesc"
+    if ($zone)                                              { Add-Line "  Zone: $zone" }
+    if ($ip1 -and $ip1 -ne '0.0.0.0')                       { Add-Line "  IP/Start: $ip1" }
+    if ($ip2 -and $ip2 -ne '0.0.0.0' -and $ip2 -ne $ip1 -and $ip2 -ne '255.255.255.255') {
+        Add-Line "  End/Mask: $ip2"
+    }
+    if ($fqdn)                                              { Add-Line "  FQDN: $fqdn" }
+    Add-Line
+}
+
+# --- Address groups --------------------------------------------------------
+Add-Section 'ADDRESS GROUPS'
+$addrGrpMembers = @{}
+foreach ($i in (Get-IndexedKey '^ao_atomToGrp_\d+$')) {
+    $member = Get-Val "ao_atomToGrp_$i"
+    $group  = Get-Val "ao_grpToGrp_$i"
+    if (-not ($group -and $member)) { continue }
+    if (-not $addrGrpMembers.ContainsKey($group)) { $addrGrpMembers[$group] = [Collections.Generic.List[string]]::new() }
+    if (-not $addrGrpMembers[$group].Contains($member)) { $addrGrpMembers[$group].Add($member) | Out-Null }
+}
+
+$customGrpCount = 0
+foreach ($i in (Get-IndexedKey '^addrObjGrpId_\d+$')) {
+    $name = Get-Val "addrObjGrpId_$i"
+    if ($name -and $name -notmatch '^(All |Default|Firewalled)') {
+        $customGrpCount++
+        Add-Line "Group: $name"
     }
 }
-#endregion
-
-#region DNS SETTINGS
-Add-Section "DNS SETTINGS"
-$output += "DNS Server 1: $($config['dns_server_one'])"
-$output += "DNS Server 2: $($config['dns_server_two'])"
-$output += "DNS Server 3: $($config['dns_server_three'])"
-if ($config['dnsProxy_enable'] -eq 'on') { $output += "DNS Proxy: Enabled" }
-if ($config['dnsProxySplit_enable'] -eq 'on') { $output += "Split DNS: Enabled" }
-#endregion
-
-#region ADDRESS OBJECTS
-Add-Section "ADDRESS OBJECTS (Custom)"
-$addrIds = $config.Keys | Where-Object { $_ -match "^addrObjId_\d+$" } | Sort-Object { [int]($_ -replace '\D', '') }
-foreach ($aid in $addrIds) {
-    $idx = $aid -replace '\D', ''
-    $name = $config["addrObjId_$idx"]
-    $type = $config["addrObjType_$idx"]
-    $zone = $config["addrObjZone_$idx"]
-    $ip1 = $config["addrObjIp1_$idx"]
-    $ip2 = $config["addrObjIp2_$idx"]
-    $fqdn = $config["addrObjFqdn_$idx"]
-    $typeDesc = switch($type) { "1" {"Host"} "2" {"Range"} "4" {"Network"} "8" {"MAC"} "16" {"FQDN"} default {"Type $type"} }
-
-    # Skip system/default objects
-    $isSystem = $name -match "^(Default|Firewalled|.*Subnets$|.*Interface IP$|All .*|.*Primary.*|U\d+ |.*Enforcement.*|RBL.*|Public Mail.*|Node License.*|Dial-Up.*|SonicPoints|X\d+ (IP|Subnet|Default))"
-
-    if ($name -and -not $isSystem -and (($ip1 -and $ip1 -ne "0.0.0.0") -or $fqdn)) {
-        $output += "Name: $name"
-        $output += "  Type: $typeDesc"
-        if ($zone) { $output += "  Zone: $zone" }
-        if ($ip1 -and $ip1 -ne "0.0.0.0") { $output += "  IP/Start: $ip1" }
-        if ($ip2 -and $ip2 -ne "0.0.0.0" -and $ip2 -ne $ip1 -and $ip2 -ne "255.255.255.255") { $output += "  End/Mask: $ip2" }
-        if ($fqdn) { $output += "  FQDN: $fqdn" }
-        $output += ""
-    }
+foreach ($grp in ($addrGrpMembers.Keys | Sort-Object)) {
+    if ($grp -match '^(All |Default|Firewalled)') { continue }
+    Add-Line ''
+    Add-Line "Group: $grp"
+    foreach ($m in $addrGrpMembers[$grp]) { Add-Line "  - $m" }
 }
-#endregion
+if ($customGrpCount -eq 0 -and $addrGrpMembers.Count -eq 0) {
+    Add-Line 'No custom address groups configured.'
+}
 
-#region ADDRESS GROUPS
-Add-Section "ADDRESS GROUPS"
-$addrGrpIds = $config.Keys | Where-Object { $_ -match "^addrObjGrpId_\d+$" } | Sort-Object { [int]($_ -replace '\D', '') }
-$grpCount = 0
-foreach ($gid in $addrGrpIds) {
-    $idx = $gid -replace '\D', ''
-    $name = $config["addrObjGrpId_$idx"]
-    if ($name -and $name -notmatch "^(All |Default|Firewalled)") {
-        $grpCount++
-        $output += "Group: $name"
-    }
-}
-# Also check ao_atomToGrp for group memberships
-$grpMemberships = @{}
-$config.Keys | Where-Object { $_ -match "^ao_atomToGrp_\d+$" } | ForEach-Object {
-    $idx = $_ -replace '\D', ''
-    $member = $config["ao_atomToGrp_$idx"]
-    $group = $config["ao_grpToGrp_$idx"]
-    if ($group -and $member) {
-        if (-not $grpMemberships[$group]) { $grpMemberships[$group] = @() }
-        $grpMemberships[$group] += $member
-    }
-}
-foreach ($grp in $grpMemberships.Keys | Sort-Object) {
-    if ($grp -notmatch "^(All |Default|Firewalled)") {
-        $output += ""
-        $output += "Group: $grp"
-        foreach ($m in $grpMemberships[$grp]) {
-            $output += "  - $m"
-        }
-    }
-}
-if ($grpCount -eq 0 -and $grpMemberships.Count -eq 0) {
-    $output += "No custom address groups configured."
-}
-#endregion
-
-#region SERVICE OBJECTS
-Add-Section "SERVICE OBJECTS (Custom)"
-$svcIds = $config.Keys | Where-Object { $_ -match "^svcObjId_\d+$" } | Sort-Object { [int]($_ -replace '\D', '') }
+# --- Service objects -------------------------------------------------------
+Add-Section 'SERVICE OBJECTS (Custom)'
 $customSvcCount = 0
-foreach ($sid in $svcIds) {
-    $idx = $sid -replace '\D', ''
-    $name = $config["svcObjId_$idx"]
-    $proto = $config["svcObjIpType_$idx"]
-    $port1 = $config["svcObjPort1_$idx"]
-    $port2 = $config["svcObjPort2_$idx"]
-    $protoDesc = switch($proto) { "6" {"TCP"} "17" {"UDP"} "1" {"ICMP"} "47" {"GRE"} "50" {"ESP"} default {"Proto $proto"} }
+foreach ($i in (Get-IndexedKey '^svcObjId_\d+$')) {
+    $name  = Get-Val "svcObjId_$i"
+    $proto = Get-Val "svcObjIpType_$i"
+    $p1    = Get-Val "svcObjPort1_$i"
+    $p2    = Get-Val "svcObjPort2_$i"
+    $desc  = switch ($proto) { '6' {'TCP'} '17' {'UDP'} '1' {'ICMP'} '47' {'GRE'} '50' {'ESP'} default {"Proto $proto"} }
+    $isCustom = ($name -match '^\d+\.\d+\.\d+\.\d+') -or ($name -match '^(Camera|Security|Agam|DVR).*Services')
+    if (-not ($name -and $isCustom)) { continue }
 
-    # Only include custom services (IP-based names or specific patterns)
-    $isCustom = ($name -match "^\d+\.\d+\.\d+\.\d+") -or ($name -match "^(Camera|Security|Agam|DVR).*Services")
+    $customSvcCount++
+    Add-Line "Service: $name"
+    Add-Line "  Protocol: $desc"
+    if ($p1)                { Add-Line "  Port Start: $p1" }
+    if ($p2 -and $p2 -ne $p1) { Add-Line "  Port End: $p2" }
+    Add-Line
+}
+if ($customSvcCount -eq 0) { Add-Line 'No custom service objects configured.' }
 
-    if ($name -and $isCustom) {
-        $customSvcCount++
-        $output += "Service: $name"
-        $output += "  Protocol: $protoDesc"
-        if ($port1) { $output += "  Port Start: $port1" }
-        if ($port2 -and $port2 -ne $port1) { $output += "  Port End: $port2" }
-        $output += ""
-    }
+# --- Service groups --------------------------------------------------------
+Add-Section 'SERVICE GROUPS (Custom)'
+$svcGrpMembers = @{}
+foreach ($i in (Get-IndexedKey '^so_atomToGrp_\d+$')) {
+    $member = Get-Val "so_atomToGrp_$i"
+    $group  = Get-Val "so_grpToGrp_$i"
+    if (-not ($group -and $member)) { continue }
+    if ($group -notmatch '^\d+\.\d+|Camera|Security|Agam|DVR') { continue }
+    if (-not $svcGrpMembers.ContainsKey($group)) { $svcGrpMembers[$group] = [Collections.Generic.List[string]]::new() }
+    if (-not $svcGrpMembers[$group].Contains($member)) { $svcGrpMembers[$group].Add($member) | Out-Null }
 }
-if ($customSvcCount -eq 0) {
-    $output += "No custom service objects configured."
-}
-#endregion
-
-#region SERVICE GROUPS
-Add-Section "SERVICE GROUPS (Custom)"
-$svcGrpMemberships = @{}
-$config.Keys | Where-Object { $_ -match "^so_atomToGrp_\d+$" } | ForEach-Object {
-    $idx = $_ -replace '\D', ''
-    $member = $config["so_atomToGrp_$idx"]
-    $group = $config["so_grpToGrp_$idx"]
-    if ($group -and $member -and ($group -match "^\d+\.\d+|Camera|Security|Agam|DVR")) {
-        if (-not $svcGrpMemberships[$group]) { $svcGrpMemberships[$group] = @() }
-        if ($svcGrpMemberships[$group] -notcontains $member) {
-            $svcGrpMemberships[$group] += $member
-        }
-    }
-}
-if ($svcGrpMemberships.Count -gt 0) {
-    foreach ($grp in $svcGrpMemberships.Keys | Sort-Object) {
-        $output += "Group: $grp"
-        foreach ($m in $svcGrpMemberships[$grp]) {
-            $output += "  - $m"
-        }
-        $output += ""
+if ($svcGrpMembers.Count -gt 0) {
+    foreach ($g in ($svcGrpMembers.Keys | Sort-Object)) {
+        Add-Line "Group: $g"
+        foreach ($m in $svcGrpMembers[$g]) { Add-Line "  - $m" }
+        Add-Line
     }
 } else {
-    $output += "No custom service groups configured."
+    Add-Line 'No custom service groups configured.'
 }
-#endregion
 
-#region DHCP CONFIGURATION
-Add-Section "DHCP CONFIGURATION"
-$output += "Global Settings:"
-$output += "  Domain: $($config['dhcp_domainname'])"
-$output += "  Default Lease: $($config['dhcp_lease']) minutes"
-$output += "  DNS1: $($config['dhcp_dns0'])"
-$output += "  DNS2: $($config['dhcp_dns1'])"
-$output += ""
+# --- DHCP scopes -----------------------------------------------------------
+Add-Section 'DHCP CONFIGURATION'
+Add-Line 'Global Settings:'
+Add-Line "  Domain: $(Get-Val 'dhcp_domainname')"
+Add-Line "  Default Lease: $(Get-Val 'dhcp_lease') minutes"
+Add-Line "  DNS1: $(Get-Val 'dhcp_dns0')"
+Add-Line "  DNS2: $(Get-Val 'dhcp_dns1')"
+Add-Line
 
 $dhcpScopes = @{}
-$dhcpKeys = $config.Keys | Where-Object { $_ -match "^prefs_dhdyn\w+_\d+$" } | Sort-Object
-foreach ($key in $dhcpKeys) {
-    if ($key -match "^prefs_dhdyn(\w+)_(\d+)$") {
-        $prop = $matches[1]
-        $num = $matches[2]
-        if (-not $dhcpScopes[$num]) { $dhcpScopes[$num] = @{} }
-        $dhcpScopes[$num][$prop] = $config[$key]
+foreach ($k in ($config.Keys | Where-Object { $_ -match '^prefs_dhdyn(?<prop>\w+?)_(?<n>\d+)$' })) {
+    [void]($k -match '^prefs_dhdyn(?<prop>\w+?)_(?<n>\d+)$')
+    if (-not $dhcpScopes.ContainsKey($Matches.n)) { $dhcpScopes[$Matches.n] = @{} }
+    $dhcpScopes[$Matches.n][$Matches.prop] = $config[$k]
+}
+foreach ($n in ($dhcpScopes.Keys | Sort-Object { [int]$_ })) {
+    $s = $dhcpScopes[$n]
+    Add-Line "DHCP Scope ${n}:"
+    if ($s.ContainsKey('scopeactive')) {
+        $en = if ($s['scopeactive'] -eq 'on') {'Yes'} else {'No'}
+        Add-Line "  Enabled: $en"
     }
+    foreach ($pair in @(
+        @('start',       'Range Start'),
+        @('end',         'Range End'),
+        @('subnetmask',  'Subnet Mask'),
+        @('router',      'Gateway'),
+        @('dns0',        'DNS1'),
+        @('dns1',        'DNS2'),
+        @('domainname',  'Domain'),
+        @('lease',       'Lease (min)'),
+        @('DhcpOptGrp',  'DHCP Option Group')
+    )) {
+        if ($s.ContainsKey($pair[0]) -and $s[$pair[0]]) { Add-Line "  $($pair[1]): $($s[$pair[0]])" }
+    }
+    Add-Line
 }
-foreach ($num in ($dhcpScopes.Keys | Sort-Object { [int]$_ })) {
-    $s = $dhcpScopes[$num]
-    $output += "DHCP Scope ${num}:"
-    if ($s['scopeactive']) { $output += "  Enabled: $(if($s['scopeactive'] -eq 'on'){'Yes'}else{'No'})" }
-    if ($s['start']) { $output += "  Range Start: $($s['start'])" }
-    if ($s['end']) { $output += "  Range End: $($s['end'])" }
-    if ($s['subnetmask']) { $output += "  Subnet Mask: $($s['subnetmask'])" }
-    if ($s['router']) { $output += "  Gateway: $($s['router'])" }
-    if ($s['dns0']) { $output += "  DNS1: $($s['dns0'])" }
-    if ($s['dns1']) { $output += "  DNS2: $($s['dns1'])" }
-    if ($s['domainname']) { $output += "  Domain: $($s['domainname'])" }
-    if ($s['lease']) { $output += "  Lease (min): $($s['lease'])" }
-    if ($s['DhcpOptGrp']) { $output += "  DHCP Option Group: $($s['DhcpOptGrp'])" }
-    $output += ""
-}
-#endregion
 
-#region STATIC DHCP LEASES
-Add-Section "STATIC DHCP LEASES"
+# --- Static DHCP leases ----------------------------------------------------
+Add-Section 'STATIC DHCP LEASES'
 $staticLeases = @{}
-$staticKeys = $config.Keys | Where-Object { $_ -match "^prefs_dhstatic\w+_\d+$" } | Sort-Object
-foreach ($key in $staticKeys) {
-    if ($key -match "^prefs_dhstatic(\w+)_(\d+)$") {
-        $prop = $matches[1]
-        $num = $matches[2]
-        if (-not $staticLeases[$num]) { $staticLeases[$num] = @{} }
-        $staticLeases[$num][$prop] = $config[$key]
-    }
+foreach ($k in ($config.Keys | Where-Object { $_ -match '^prefs_dhstatic(?<prop>\w+?)_(?<n>\d+)$' })) {
+    [void]($k -match '^prefs_dhstatic(?<prop>\w+?)_(?<n>\d+)$')
+    if (-not $staticLeases.ContainsKey($Matches.n)) { $staticLeases[$Matches.n] = @{} }
+    $staticLeases[$Matches.n][$Matches.prop] = $config[$k]
 }
 $leaseCount = 0
-foreach ($num in ($staticLeases.Keys | Sort-Object { [int]$_ })) {
-    $s = $staticLeases[$num]
-    if ($s['ip'] -or $s['hw']) {
-        $leaseCount++
-        $output += "Static Lease ${num}:"
-        if ($s['name']) { $output += "  Name: $($s['name'])" }
-        if ($s['ip']) { $output += "  IP Address: $($s['ip'])" }
-        if ($s['hw']) {
-            $mac = $s['hw']
-            # Format MAC address with colons
-            if ($mac.Length -eq 12) {
-                $mac = $mac -replace '(.{2})', '$1:' -replace ':$', ''
-            }
-            $output += "  MAC Address: $mac"
-        }
-        if ($s['router']) { $output += "  Gateway: $($s['router'])" }
-        if ($s['subnetmask']) { $output += "  Subnet: $($s['subnetmask'])" }
-        if ($s['scopeactive'] -eq 'on') { $output += "  Active: Yes" }
-        $output += ""
+foreach ($n in ($staticLeases.Keys | Sort-Object { [int]$_ })) {
+    $s = $staticLeases[$n]
+    if (-not ($s.ContainsKey('ip') -or $s.ContainsKey('hw'))) { continue }
+    $leaseCount++
+    Add-Line "Static Lease ${n}:"
+    if ($s.ContainsKey('name')) { Add-Line "  Name: $($s['name'])" }
+    if ($s.ContainsKey('ip'))   { Add-Line "  IP Address: $($s['ip'])" }
+    if ($s.ContainsKey('hw')) {
+        $mac = $s['hw']
+        if ($mac.Length -eq 12) { $mac = ($mac -replace '(.{2})','$1:').TrimEnd(':') }
+        Add-Line "  MAC Address: $mac"
     }
+    if ($s.ContainsKey('router'))     { Add-Line "  Gateway: $($s['router'])" }
+    if ($s.ContainsKey('subnetmask')) { Add-Line "  Subnet: $($s['subnetmask'])" }
+    if ($s.ContainsKey('scopeactive') -and $s['scopeactive'] -eq 'on') { Add-Line '  Active: Yes' }
+    Add-Line
 }
-if ($leaseCount -eq 0) {
-    $output += "No static DHCP leases configured."
-}
-$output += ""
-$output += "Total Static Leases: $leaseCount"
-#endregion
+if ($leaseCount -eq 0) { Add-Line 'No static DHCP leases configured.' }
+Add-Line
+Add-Line "Total Static Leases: $leaseCount"
 
-#region DHCP OPTIONS
-Add-Section "DHCP OPTIONS"
-$dhcpOptIds = $config.Keys | Where-Object { $_ -match "^dhcpOptionId_\d+$" } | Sort-Object { [int]($_ -replace '\D', '') }
+# --- DHCP options ----------------------------------------------------------
+Add-Section 'DHCP OPTIONS'
 $optCount = 0
-foreach ($oid in $dhcpOptIds) {
-    $idx = $oid -replace '\D', ''
-    $name = $config["dhcpOptionId_$idx"]
-    $tagNum = $config["dhcpOptionObjTagNumber_$idx"]
-    $tagVal = $config["dhcpOptionObjTagValue_$idx"]
-    if ($name -and $tagVal) {
-        $optCount++
-        $output += "Option: $name"
-        $output += "  Tag Number: $tagNum"
-        $output += "  Value: $tagVal"
-        $output += ""
-    }
+foreach ($i in (Get-IndexedKey '^dhcpOptionId_\d+$')) {
+    $name   = Get-Val "dhcpOptionId_$i"
+    $tagNum = Get-Val "dhcpOptionObjTagNumber_$i"
+    $tagVal = Get-Val "dhcpOptionObjTagValue_$i"
+    if (-not ($name -and $tagVal)) { continue }
+    $optCount++
+    Add-Line "Option: $name"
+    Add-Line "  Tag Number: $tagNum"
+    Add-Line "  Value: $tagVal"
+    Add-Line
 }
-if ($optCount -eq 0) {
-    $output += "No custom DHCP options configured."
-}
-#endregion
+if ($optCount -eq 0) { Add-Line 'No custom DHCP options configured.' }
 
-#region NAT POLICIES
-Add-Section "NAT POLICIES"
-$natPols = @{}
-$natKeys = $config.Keys | Where-Object { $_ -match "^natPolicy\w+_\d+$" } | Sort-Object
-foreach ($key in $natKeys) {
-    if ($key -match "^natPolicy(\w+)_(\d+)$") {
-        $prop = $matches[1]
-        $num = $matches[2]
-        if (-not $natPols[$num]) { $natPols[$num] = @{} }
-        $natPols[$num][$prop] = $config[$key]
-    }
+# --- NAT -------------------------------------------------------------------
+Add-Section 'NAT POLICIES'
+$nat = @{}
+foreach ($k in ($config.Keys | Where-Object { $_ -match '^natPolicy(?<prop>\w+?)_(?<n>\d+)$' })) {
+    [void]($k -match '^natPolicy(?<prop>\w+?)_(?<n>\d+)$')
+    if (-not $nat.ContainsKey($Matches.n)) { $nat[$Matches.n] = @{} }
+    $nat[$Matches.n][$Matches.prop] = $config[$k]
 }
 $natCount = 0
-foreach ($num in ($natPols.Keys | Sort-Object { [int]$_ })) {
-    $n = $natPols[$num]
-    if (-not $n['OrigSrc'] -and -not $n['OrigDst'] -and -not $n['OrigSvc']) { continue }
+foreach ($n in ($nat.Keys | Sort-Object { [int]$_ })) {
+    $p = $nat[$n]
+    if (-not ($p.ContainsKey('OrigSrc') -or $p.ContainsKey('OrigDst') -or $p.ContainsKey('OrigSvc'))) { continue }
     $natCount++
-    $output += "NAT Policy ${num}:"
-    if ($n['Name']) { $output += "  Name: $($n['Name'])" }
-    if ($n['Enabled']) { $output += "  Enabled: $(if($n['Enabled'] -eq '1'){'Yes'}else{'No'})" }
-    if ($n['OrigSrc']) { $output += "  Source Original: $($n['OrigSrc'])" }
-    if ($n['TransSrc']) { $output += "  Source Translated: $($n['TransSrc'])" }
-    if ($n['OrigDst']) { $output += "  Dest Original: $($n['OrigDst'])" }
-    if ($n['TransDst']) { $output += "  Dest Translated: $($n['TransDst'])" }
-    if ($n['OrigSvc']) { $output += "  Service Original: $($n['OrigSvc'])" }
-    if ($n['TransSvc']) { $output += "  Service Translated: $($n['TransSvc'])" }
-    if ($n['Comment']) { $output += "  Comment: $($n['Comment'])" }
-    $output += ""
-}
-$output += "Total NAT Policies: $natCount"
-#endregion
-
-#region FIREWALL ACCESS RULES
-Add-Section "FIREWALL ACCESS RULES"
-$policies = @{}
-$policyKeys = $config.Keys | Where-Object { $_ -match "^policy\w+_\d+$" } | Sort-Object
-foreach ($key in $policyKeys) {
-    if ($key -match "^policy(\w+)_(\d+)$") {
-        $prop = $matches[1]
-        $num = $matches[2]
-        if (-not $policies[$num]) { $policies[$num] = @{} }
-        $policies[$num][$prop] = $config[$key]
+    Add-Line "NAT Policy ${n}:"
+    if ($p.ContainsKey('Name'))     { Add-Line "  Name: $($p['Name'])" }
+    if ($p.ContainsKey('Enabled')) {
+        $en = if ($p['Enabled'] -eq '1') {'Yes'} else {'No'}
+        Add-Line "  Enabled: $en"
     }
+    foreach ($pair in @(
+        @('OrigSrc','Source Original'), @('TransSrc','Source Translated'),
+        @('OrigDst','Dest Original'),   @('TransDst','Dest Translated'),
+        @('OrigSvc','Service Original'),@('TransSvc','Service Translated'),
+        @('Comment','Comment')
+    )) {
+        if ($p.ContainsKey($pair[0]) -and $p[$pair[0]]) { Add-Line "  $($pair[1]): $($p[$pair[0]])" }
+    }
+    Add-Line
+}
+Add-Line "Total NAT Policies: $natCount"
+
+# --- Firewall rules --------------------------------------------------------
+Add-Section 'FIREWALL ACCESS RULES'
+$pol = @{}
+foreach ($k in ($config.Keys | Where-Object { $_ -match '^policy(?<prop>\w+?)_(?<n>\d+)$' })) {
+    [void]($k -match '^policy(?<prop>\w+?)_(?<n>\d+)$')
+    if (-not $pol.ContainsKey($Matches.n)) { $pol[$Matches.n] = @{} }
+    $pol[$Matches.n][$Matches.prop] = $config[$k]
 }
 $ruleCount = 0
-foreach ($num in ($policies.Keys | Sort-Object { [int]$_ })) {
-    $p = $policies[$num]
+foreach ($n in ($pol.Keys | Sort-Object { [int]$_ })) {
+    $p = $pol[$n]
     $ruleCount++
-    $actionDesc = switch($p['Action']) { "0" {"Deny"} "1" {"Discard"} "2" {"Allow"} default {"Action $($p['Action'])"} }
-    $output += "Rule ${num}:"
-    if ($p['Name']) { $output += "  Name: $($p['Name'])" }
-    if ($p['Enabled']) { $output += "  Enabled: $(if($p['Enabled'] -eq '1'){'Yes'}else{'No'})" }
-    if ($p['Action']) { $output += "  Action: $actionDesc" }
-    if ($p['SrcZone']) { $output += "  Source Zone: $($p['SrcZone'])" }
-    if ($p['DstZone']) { $output += "  Dest Zone: $($p['DstZone'])" }
-    if ($p['SrcNet']) { $output += "  Source: $($p['SrcNet'])" }
-    if ($p['DstNet']) { $output += "  Destination: $($p['DstNet'])" }
-    if ($p['SrcSvc']) { $output += "  Source Service: $($p['SrcSvc'])" }
-    if ($p['DstSvc']) { $output += "  Dest Service: $($p['DstSvc'])" }
-    if ($p['Time']) { $output += "  Schedule: $($p['Time'])" }
-    if ($p['Comment']) { $output += "  Comment: $($p['Comment'])" }
-    if ($p['DefaultRule'] -eq "1") { $output += "  [DEFAULT RULE]" }
-    if ($p['Management'] -eq "1") { $output += "  [MANAGEMENT RULE]" }
-    $output += ""
-}
-$output += "Total Firewall Rules: $ruleCount"
-#endregion
-
-#region ROUTING
-Add-Section "ROUTING / STATIC ROUTES"
-$output += "(Default routes are defined by interface gateways - see INTERFACES section)"
-$output += ""
-$routes = @{}
-$routeKeys = $config.Keys | Where-Object { $_ -match "^routePol\w+_\d+$" } | Sort-Object
-foreach ($key in $routeKeys) {
-    if ($key -match "^routePol(\w+)_(\d+)$") {
-        $prop = $matches[1]
-        $num = $matches[2]
-        if (-not $routes[$num]) { $routes[$num] = @{} }
-        $routes[$num][$prop] = $config[$key]
+    $actDesc = switch ($p['Action']) { '0' {'Deny'} '1' {'Discard'} '2' {'Allow'} default {"Action $($p['Action'])"} }
+    Add-Line "Rule ${n}:"
+    if ($p.ContainsKey('Name'))    { Add-Line "  Name: $($p['Name'])" }
+    if ($p.ContainsKey('Enabled')) {
+        $en = if ($p['Enabled'] -eq '1') {'Yes'} else {'No'}
+        Add-Line "  Enabled: $en"
     }
+    if ($p.ContainsKey('Action'))  { Add-Line "  Action: $actDesc" }
+    foreach ($pair in @(
+        @('SrcZone','Source Zone'), @('DstZone','Dest Zone'),
+        @('SrcNet','Source'),       @('DstNet','Destination'),
+        @('SrcSvc','Source Service'), @('DstSvc','Dest Service'),
+        @('Time','Schedule'), @('Comment','Comment')
+    )) {
+        if ($p.ContainsKey($pair[0]) -and $p[$pair[0]]) { Add-Line "  $($pair[1]): $($p[$pair[0]])" }
+    }
+    if ($p['DefaultRule'] -eq '1') { Add-Line '  [DEFAULT RULE]' }
+    if ($p['Management']  -eq '1') { Add-Line '  [MANAGEMENT RULE]' }
+    Add-Line
+}
+Add-Line "Total Firewall Rules: $ruleCount"
+
+# --- Static routes ---------------------------------------------------------
+Add-Section 'ROUTING / STATIC ROUTES'
+Add-Line '(Default routes are defined by interface gateways — see INTERFACES.)'
+Add-Line
+$routes = @{}
+foreach ($k in ($config.Keys | Where-Object { $_ -match '^routePol(?<prop>\w+?)_(?<n>\d+)$' })) {
+    [void]($k -match '^routePol(?<prop>\w+?)_(?<n>\d+)$')
+    if (-not $routes.ContainsKey($Matches.n)) { $routes[$Matches.n] = @{} }
+    $routes[$Matches.n][$Matches.prop] = $config[$k]
 }
 if ($routes.Count -eq 0) {
-    $output += "No custom static routes configured."
+    Add-Line 'No custom static routes configured.'
 } else {
-    foreach ($num in ($routes.Keys | Sort-Object { [int]$_ })) {
-        $r = $routes[$num]
-        $output += "Route ${num}:"
-        if ($r['Src']) { $output += "  Source: $($r['Src'])" }
-        if ($r['Dst']) { $output += "  Destination: $($r['Dst'])" }
-        if ($r['Svc']) { $output += "  Service: $($r['Svc'])" }
-        if ($r['Gateway']) { $output += "  Gateway: $($r['Gateway'])" }
-        if ($r['Iface']) { $output += "  Interface: $($r['Iface'])" }
-        if ($r['Metric']) { $output += "  Metric: $($r['Metric'])" }
-        $output += ""
+    foreach ($n in ($routes.Keys | Sort-Object { [int]$_ })) {
+        $r = $routes[$n]
+        Add-Line "Route ${n}:"
+        foreach ($pair in @(
+            @('Src','Source'), @('Dst','Destination'),
+            @('Svc','Service'), @('Gateway','Gateway'),
+            @('Iface','Interface'), @('Metric','Metric')
+        )) {
+            if ($r.ContainsKey($pair[0]) -and $r[$pair[0]]) { Add-Line "  $($pair[1]): $($r[$pair[0]])" }
+        }
+        Add-Line
     }
 }
-#endregion
 
-#region VPN CONFIGURATION
-Add-Section "VPN CONFIGURATION"
+# --- VPN -------------------------------------------------------------------
+Add-Section 'VPN CONFIGURATION'
+Add-Line 'IPsec Settings:'
+Add-Line "  IPsec Enabled: $(Get-Val 'ipsecEnable')"
+Add-Line
+Add-Line 'VPN Tunnels:'
+foreach ($i in (Get-IndexedKey '^ipsecName_\d+$')) {
+    $name      = Get-Val "ipsecName_$i"
+    $gwAddr    = Get-Val "ipsecGwAddr_$i"
+    $disabled  = Get-Val "ipsecSaDisabled_$i"
+    $p1Exch    = Get-Val "ipsecP1Exch_$i"
+    $p1Dh      = Get-Val "ipsecP1DHGrp_$i"
+    $p1Enc     = Get-Val "ipsecPh1CryptAlg_$i"
+    $p1Auth    = Get-Val "ipsecPh1AuthAlg_$i"
+    $localNet  = Get-Val "ipsecLocalNet_$i"
+    $remoteNet = Get-Val "ipsecRemoteNet_$i"
 
-# IPsec Global Settings
-$output += "IPsec Settings:"
-$output += "  IPsec Enabled: $($config['ipsecEnable'])"
-$output += ""
+    $exchDesc = switch ($p1Exch) { '1' {'Main Mode'} '2' {'Aggressive Mode'} default {"Mode $p1Exch"} }
+    $dhDesc   = switch ($p1Dh)   { '1' {'Group 1'} '2' {'Group 2'} '5' {'Group 5'} '14' {'Group 14'} default {"Group $p1Dh"} }
+    $encDesc  = switch ($p1Enc)  { '1' {'DES'} '2' {'3DES'} '3' {'AES-128'} '4' {'AES-192'} '5' {'AES-256'} default {"Alg $p1Enc"} }
+    $authDesc = switch ($p1Auth) { '1' {'MD5'} '2' {'SHA1'} '3' {'SHA256'} '4' {'SHA384'} '5' {'SHA512'} default {"Alg $p1Auth"} }
 
-# VPN Tunnels
-$output += "VPN Tunnels:"
-$vpnNames = $config.Keys | Where-Object { $_ -match "^ipsecName_\d+$" } | Sort-Object { [int]($_ -replace '\D', '') }
-foreach ($vn in $vpnNames) {
-    $idx = $vn -replace '\D', ''
-    $name = $config["ipsecName_$idx"]
-    $gwAddr = $config["ipsecGwAddr_$idx"]
-    $enabled = $config["ipsecSaDisabled_$idx"]
-    $p1Exch = $config["ipsecP1Exch_$idx"]
-    $p1Dh = $config["ipsecP1DHGrp_$idx"]
-    $p1Enc = $config["ipsecPh1CryptAlg_$idx"]
-    $p1Auth = $config["ipsecPh1AuthAlg_$idx"]
-    $p2Enc = $config["ipsecPh2CryptAlg_$idx"]
-    $p2Auth = $config["ipsecPh2AuthAlg_$idx"]
-    $localNet = $config["ipsecLocalNet_$idx"]
-    $remoteNet = $config["ipsecRemoteNet_$idx"]
-
-    $exchDesc = switch($p1Exch) { "1" {"Main Mode"} "2" {"Aggressive Mode"} default {"Mode $p1Exch"} }
-    $dhDesc = switch($p1Dh) { "1" {"Group 1"} "2" {"Group 2"} "5" {"Group 5"} "14" {"Group 14"} default {"Group $p1Dh"} }
-    $encDesc = switch($p1Enc) { "1" {"DES"} "2" {"3DES"} "3" {"AES-128"} "4" {"AES-192"} "5" {"AES-256"} default {"Alg $p1Enc"} }
-    $authDesc = switch($p1Auth) { "1" {"MD5"} "2" {"SHA1"} "3" {"SHA256"} "4" {"SHA384"} "5" {"SHA512"} default {"Alg $p1Auth"} }
-
-    $output += ""
-    $output += "  Tunnel: $name"
-    if ($enabled -eq 'off') { $output += "    Status: Enabled" } else { $output += "    Status: Disabled" }
-    if ($gwAddr -and $gwAddr -ne "0.0.0.0") { $output += "    Gateway: $gwAddr" }
-    if ($localNet) { $output += "    Local Network: $localNet" }
-    if ($remoteNet) { $output += "    Remote Network: $remoteNet" }
-    $output += "    Phase 1: $exchDesc, $dhDesc, $encDesc, $authDesc"
+    Add-Line
+    Add-Line "  Tunnel: $name"
+    $status = if ($disabled -eq 'off') {'Enabled'} else {'Disabled'}
+    Add-Line "    Status: $status"
+    if ($gwAddr -and $gwAddr -ne '0.0.0.0') { Add-Line "    Gateway: $gwAddr" }
+    if ($localNet)  { Add-Line "    Local Network:  $localNet" }
+    if ($remoteNet) { Add-Line "    Remote Network: $remoteNet" }
+    Add-Line "    Phase 1: $exchDesc, $dhDesc, $encDesc, $authDesc"
 }
 
-# SSL VPN
-$output += ""
-$output += "SSL VPN Settings:"
-$output += "  Port: $($config['sslvpnSvcPort'])"
-$output += "  User Domain: $($config['sslvpnUserDomain'])"
-if ($config['SslvpnsDnsServer1'] -and $config['SslvpnsDnsServer1'] -ne "0.0.0.0") {
-    $output += "  DNS Server 1: $($config['SslvpnsDnsServer1'])"
+Add-Line
+Add-Line 'SSL VPN Settings:'
+Add-Line "  Port: $(Get-Val 'sslvpnSvcPort')"
+Add-Line "  User Domain: $(Get-Val 'sslvpnUserDomain')"
+if ((Get-Val 'SslvpnsDnsServer1') -and (Get-Val 'SslvpnsDnsServer1') -ne '0.0.0.0') {
+    Add-Line "  DNS Server 1: $(Get-Val 'SslvpnsDnsServer1')"
 }
-if ($config['SslvpnsDnsServer2'] -and $config['SslvpnsDnsServer2'] -ne "0.0.0.0") {
-    $output += "  DNS Server 2: $($config['SslvpnsDnsServer2'])"
+if ((Get-Val 'SslvpnsDnsServer2') -and (Get-Val 'SslvpnsDnsServer2') -ne '0.0.0.0') {
+    Add-Line "  DNS Server 2: $(Get-Val 'SslvpnsDnsServer2')"
 }
-#endregion
 
-#region SCHEDULES
-Add-Section "SCHEDULES"
-$schedIds = $config.Keys | Where-Object { $_ -match "^schedObjId_\d+$" } | Sort-Object { [int]($_ -replace '\D', '') }
-foreach ($sid in $schedIds) {
-    $idx = $sid -replace '\D', ''
-    $name = $config["schedObjId_$idx"]
-    $output += "Schedule: $name"
+# --- Schedules -------------------------------------------------------------
+Add-Section 'SCHEDULES'
+foreach ($i in (Get-IndexedKey '^schedObjId_\d+$')) {
+    Add-Line "Schedule: $(Get-Val "schedObjId_$i")"
 }
-#endregion
 
-#region SUMMARY
-Add-Section "CONFIGURATION SUMMARY"
-$output += "Interfaces: $($ifaceNums.Count)"
-$output += "Zones: $($zoneIds.Count)"
-$output += "DHCP Scopes: $($dhcpScopes.Count)"
-$output += "Static DHCP Leases: $leaseCount"
-$output += "NAT Policies: $natCount"
-$output += "Firewall Rules: $ruleCount"
-$output += "Schedules: $($schedIds.Count)"
-#endregion
+# --- Summary ---------------------------------------------------------------
+Add-Section 'CONFIGURATION SUMMARY'
+Add-Line "Interfaces:         $(@($ifaceIds).Count)"
+Add-Line "Zones:              $(@(Get-IndexedKey '^zoneObjId_\d+$').Count)"
+Add-Line "DHCP Scopes:        $($dhcpScopes.Count)"
+Add-Line "Static DHCP Leases: $leaseCount"
+Add-Line "NAT Policies:       $natCount"
+Add-Line "Firewall Rules:     $ruleCount"
+Add-Line "Schedules:          $(@(Get-IndexedKey '^schedObjId_\d+$').Count)"
 
-$output | Out-File -FilePath $OutputFile -Encoding UTF8
-Write-Host "Done! Essential config written to: $OutputFile"
-Write-Host "Total lines: $($output.Count)"
+# --- Write -----------------------------------------------------------------
+$sb.ToString() | Set-Content -LiteralPath $OutputFile -Encoding UTF8
+Write-Host "Done. Wrote $OutputFile."

@@ -1,172 +1,189 @@
-# Script must be run as Administrator
-if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Host "Please run PowerShell as an Administrator."
-    exit
+﻿<#
+.SYNOPSIS
+    Copy or move an old (on-prem) user profile's contents into the new
+    (Azure AD) profile's folder, fix ACLs for the new SID, and optionally
+    reset Windows Hello and rebuild the Start Menu.
+
+.NOTES
+    Must run elevated. This operation is destructive when in "move" mode;
+    a log is written to C:\NACMigration\UserFolderTransferLog.txt.
+#>
+
+#Requires -RunAsAdministrator
+[CmdletBinding()]
+param(
+    [string]$LogDirectory = 'C:\NACMigration'
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+# --- Logging ---------------------------------------------------------------
+if (-not (Test-Path $LogDirectory)) {
+    New-Item -Path $LogDirectory -ItemType Directory -Force | Out-Null
+}
+$logFile = Join-Path $LogDirectory 'UserFolderTransferLog.txt'
+
+function Write-MigrationLog {
+    param([Parameter(Mandatory)][string]$Message)
+    $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $line  = "$stamp  $Message"
+    Add-Content -LiteralPath $logFile -Value $line
+    Write-Host $line
 }
 
-function List-UserSIDs {
-    Get-WmiObject -Class Win32_UserAccount | Select-Object Name, SID | Format-Table -AutoSize | Out-String
+Write-MigrationLog '=== User folder transfer started ==='
+
+# --- Helpers ---------------------------------------------------------------
+
+function Get-LocalUserSidTable {
+    Get-CimInstance -ClassName Win32_UserAccount -Filter 'LocalAccount=TRUE' |
+        Select-Object Name, SID
 }
 
-function Confirm-Step {
-    param (
-        [string]$message
-    )
-    $response = Read-Host "$message (y/n)"
-    if ($response -ne 'y') {
-        Write-Host "Operation cancelled."
-        exit
+function Read-YesNo {
+    param([Parameter(Mandatory)][string]$Prompt)
+    while ($true) {
+        $ans = (Read-Host "$Prompt (y/n)").Trim().ToLowerInvariant()
+        if ($ans -eq 'y') { return $true }
+        if ($ans -eq 'n') { return $false }
     }
 }
 
-function Check-AndListUserProfiles {
-    param (
-        [string]$profilePath,
-        [string]$profileType
-    )
-    if (-Not (Test-Path $profilePath)) {
-        Write-Host "$profileType profile does not exist. Please select a valid profile."
-        Write-Host "Available profiles in C:\Users:"
-        Get-ChildItem -Path "C:\Users" -Directory | ForEach-Object {
-            Write-Host $_.Name
+function Confirm-OrExit {
+    param([Parameter(Mandatory)][string]$Message)
+    if (-not (Read-YesNo $Message)) {
+        Write-MigrationLog 'User declined confirmation. Aborting.'
+        exit 1
+    }
+}
+
+function Get-ProfileInput {
+    Write-Host 'Profiles under C:\Users:'
+    Get-ChildItem 'C:\Users' -Directory | ForEach-Object { Write-Host "  $($_.Name)" }
+
+    Write-Host ''
+    Write-Host 'Local user SIDs (you will usually want the new Azure AD profile''s SID, which starts with S-1-12-1):'
+    Get-LocalUserSidTable | Format-Table -AutoSize | Out-String | Write-Host
+
+    while ($true) {
+        $old  = Read-Host 'Old (source) profile folder name'
+        $new  = Read-Host 'New (target) profile folder name'
+        $sid  = Read-Host 'SID of the new/target user'
+
+        $src = Join-Path 'C:\Users' $old
+        $dst = Join-Path 'C:\Users' $new
+
+        if (-not (Test-Path $src)) { Write-Warning "Source profile not found: $src"; continue }
+        if (-not (Test-Path $dst)) { Write-Warning "Target profile not found: $dst"; continue }
+        if ($sid -notmatch '^S-1-') { Write-Warning "SID doesn't look right: $sid"; continue }
+
+        return [pscustomobject]@{
+            OldName = $old
+            NewName = $new
+            NewSID  = $sid
+            Source  = $src
+            Target  = $dst
         }
-        return $false
     }
-    return $true
 }
 
-$logDirectory = "C:\NACMigration"
-$logFile = "$logDirectory\UserFolderTransferLog.txt"
-
-# Ensure the log directory exists
-if (-Not (Test-Path $logDirectory)) {
-    New-Item -Path $logDirectory -ItemType Directory
-}
-
-# Initialize log file
-Write-Output "Log initialized at $(Get-Date)" | Out-File -FilePath $logFile -Append
-
-function Log-Message {
-    param (
-        [string]$message
+function Grant-ProfileAcl {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Sid
     )
-    Write-Output "$message" | Out-File -FilePath $logFile -Append
-    Write-Host "$message"
+    Write-MigrationLog "icacls $Path /grant *${Sid}:(OI)(CI)F /T"
+    & icacls.exe $Path /grant "*${Sid}:(OI)(CI)F" /T | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Warning "icacls returned $LASTEXITCODE on $Path" }
 }
 
-function Get-UserProfileDetails {
-    # List all user profiles in the C:\Users directory
-    Write-Host "Available profiles in C:\Users:"
-    Get-ChildItem -Path "C:\Users" -Directory | ForEach-Object {
-        Write-Host $_.Name
+function Reset-WindowsHello {
+    param([Parameter(Mandatory)][string]$Sid)
+
+    $ngc = 'C:\Windows\ServiceProfiles\LocalService\AppData\Local\Microsoft\Ngc'
+    $services = 'VaultSvc','UserManager','WbioSrvc'
+
+    foreach ($s in $services) {
+        try { Stop-Service -Name $s -Force -ErrorAction Stop; Write-MigrationLog "Stopped $s" }
+        catch { Write-Warning "Could not stop ${s}: $($_.Exception.Message)" }
     }
 
-    # Display User SIDs
-    Write-Host "Displaying user SIDs:"
-    $userSIDs = List-UserSIDs
-    Write-Host $userSIDs
+    if (Test-Path $ngc) {
+        & takeown.exe /f $ngc /r /d Y | Out-Null
+        & icacls.exe  $ngc /grant "*${Sid}:(F)" /t /c | Out-Null
+        Remove-Item $ngc -Recurse -Force -ErrorAction SilentlyContinue
+        Write-MigrationLog 'Ngc folder removed.'
+    } else {
+        Write-MigrationLog 'Ngc folder not present.'
+    }
 
-    $validProfiles = $false
-    while (-not $validProfiles) {
-        # Get user input for old and new profile names and new profile SID
-        $oldProfileName = Read-Host "Enter the old/source profile name"
-        $newProfileName = Read-Host "Enter the new/target Azure AD profile name"
-        $newProfileSID = Read-Host "Enter the SID for the new/target profile"
+    foreach ($s in $services) {
+        try { Start-Service -Name $s -ErrorAction Stop; Write-MigrationLog "Started $s" }
+        catch { Write-Warning "Could not start ${s}: $($_.Exception.Message)" }
+    }
+}
 
-        # Define source and target user profiles based on user input
-        $sourceProfile = "C:\Users\$oldProfileName"
-        $targetProfile = "C:\Users\$newProfileName"
-
-        # Check existence of source and target profiles
-        $sourceExists = Check-AndListUserProfiles $sourceProfile "Source"
-        $targetExists = Check-AndListUserProfiles $targetProfile "Target"
-
-        if ($sourceExists -and $targetExists) {
-            $validProfiles = $true
+function Repair-StartMenu {
+    Write-MigrationLog 'Re-registering AppX packages for all users (this can take a few minutes)...'
+    Get-AppxPackage -AllUsers | ForEach-Object {
+        try {
+            Add-AppxPackage -DisableDevelopmentMode -Register (Join-Path $_.InstallLocation 'AppXManifest.xml') -ErrorAction Stop
+        } catch {
+            Write-Warning "Failed to re-register $($_.Name): $($_.Exception.Message)"
         }
     }
-
-    return @($oldProfileName, $newProfileName, $newProfileSID, $sourceProfile, $targetProfile)
 }
 
-$details = Get-UserProfileDetails
-$oldProfileName = $details[0]
-$newProfileName = $details[1]
-$newProfileSID = $details[2]
-$sourceProfile = $details[3]
-$targetProfile = $details[4]
+# --- Gather inputs ---------------------------------------------------------
+$p = Get-ProfileInput
 
-# Log entered details
-Log-Message "You have entered the following details:"
-Log-Message "Old/source profile name: $oldProfileName"
-Log-Message "New/target profile name: $newProfileName"
-Log-Message "New/target profile SID: $newProfileSID"
-Log-Message "Source profile path: $sourceProfile"
-Log-Message "Target profile path: $targetProfile"
-Log-Message "Warning: This script moves or copies files based on your choice and is irreversible. Use at your own risk."
+Write-MigrationLog "Old profile:  $($p.OldName)  ($($p.Source))"
+Write-MigrationLog "New profile:  $($p.NewName)  ($($p.Target))"
+Write-MigrationLog "New SID:      $($p.NewSID)"
+Write-MigrationLog 'WARNING: This script can move files and is not reversible.'
 
-# Confirm before proceeding
-Confirm-Step "Do you want to proceed with the profile changes?"
+Confirm-OrExit 'Proceed with the profile migration?'
 
-# Ask if the user wants to change permissions on the source profile
-$changeSourcePerms = Read-Host "Do you want to change permissions on the old/source profile? (y/n)"
-if ($changeSourcePerms -eq 'y') {
-    Log-Message "Setting permissions for *$newProfileSID on $sourceProfile..."
-    icacls $sourceProfile /grant ("*${newProfileSID}:(OI)(CI)F") /T
+if (Read-YesNo 'Grant the new SID full control over the OLD profile folder first?') {
+    Grant-ProfileAcl -Path $p.Source -Sid $p.NewSID
 }
 
-# Ask if the user wants to change permissions on the target profile
-$changeTargetPerms = Read-Host "Do you want to change permissions on the new/target profile? (y/n)"
-if ($changeTargetPerms -eq 'y') {
-    Log-Message "Setting permissions for *$newProfileSID on $targetProfile..."
-    icacls $targetProfile /grant ("*${newProfileSID}:(OI)(CI)F") /T
+if (Read-YesNo 'Grant the new SID full control over the NEW profile folder?') {
+    Grant-ProfileAcl -Path $p.Target -Sid $p.NewSID
 }
 
-# Ask if the user wants to move or copy the profile data
-$operation = Read-Host "Do you want to move (m) or copy (c) the profile data?"
-if ($operation -eq 'm') {
-    Confirm-Step "Confirm moving all contents from $sourceProfile to $targetProfile"
-    Move-Item -Path "$sourceProfile\*" -Destination $targetProfile -Force
-} elseif ($operation -eq 'c') {
-    Confirm-Step "Confirm copying all contents from $sourceProfile to $targetProfile"
-    Copy-Item -Path "$sourceProfile\*" -Destination $targetProfile -Recurse -Force
+# --- Move / copy -----------------------------------------------------------
+while ($true) {
+    $op = (Read-Host 'Move (m) or copy (c) the profile data?').Trim().ToLowerInvariant()
+    if ($op -eq 'm' -or $op -eq 'c') { break }
+}
+
+# Use robocopy — much faster, hardlink-safe, and logs attribute/ACL issues we care about.
+$robocopyArgs = @('/E','/COPY:DAT','/DCOPY:DAT','/R:1','/W:2','/NFL','/NDL','/NP')
+if ($op -eq 'm') {
+    Confirm-OrExit "Confirm MOVE from $($p.Source) → $($p.Target)"
+    $robocopyArgs += '/MOVE'
 } else {
-    Log-Message "Invalid operation selected. Operation cancelled."
+    Confirm-OrExit "Confirm COPY from $($p.Source) → $($p.Target)"
 }
 
-# Ask if the user wants to reset Windows Hello
-$resetWindowsHello = Read-Host "Do you want to reset Windows Hello? (y/n)"
-if ($resetWindowsHello -eq 'y') {
-    # Handle Windows Hello reset
-    $ngcPath = "C:\Windows\ServiceProfiles\LocalService\AppData\Local\Microsoft\Ngc"
-    $services = @("VaultSvc", "UserManager", "WbioSrvc")
-    foreach ($service in $services) {
-        Stop-Service -Name $service
-        Log-Message "Stopped service: $service"
-    }
-
-    takeown /f $ngcPath /r /d Y
-    icacls $ngcPath /grant ("*${newProfileSID}:(F)") /t /c
-    Remove-Item -Path $ngcPath -Recurse -Force -ErrorAction SilentlyContinue
-    Log-Message "Windows Hello reset: Ngc folder modified."
-
-    foreach ($service in $services) {
-        Start-Service -Name $service
-        Log-Message "Restarted service: $service"
-    }
+Write-MigrationLog "robocopy $($p.Source) $($p.Target) $($robocopyArgs -join ' ')"
+& robocopy.exe $p.Source $p.Target @robocopyArgs | Tee-Object -Variable robocopyOutput | Write-Host
+# robocopy exit codes 0–7 are success (8+ indicate real failures).
+if ($LASTEXITCODE -ge 8) {
+    Write-MigrationLog "robocopy reported failure (exit $LASTEXITCODE). See output above."
+    throw "robocopy failed (exit $LASTEXITCODE)"
 }
+Write-MigrationLog "robocopy finished (exit $LASTEXITCODE)."
 
-# Ask if the user wants to rebuild the Start Menu
-$rebuildStartMenu = Read-Host "Do you want to rebuild the Start Menu? (y/n)"
-if ($rebuildStartMenu -eq 'y') {
-    # Rebuild the Start Menu
-    Get-AppXPackage -AllUsers | Foreach {Add-AppxPackage -DisableDevelopmentMode -Register "$($_.InstallLocation)\AppXManifest.xml"}
-}
+# --- Optional extras -------------------------------------------------------
+if (Read-YesNo 'Reset Windows Hello?')          { Reset-WindowsHello -Sid $p.NewSID }
+if (Read-YesNo 'Rebuild the Start Menu tiles?') { Repair-StartMenu }
 
-# Final confirmation before restart
-$restart = Read-Host "Operation complete. Do you want to restart the PC now? (y/n)"
-if ($restart -eq 'y') {
-    Restart-Computer
+if (Read-YesNo 'Restart now?') {
+    Write-MigrationLog 'Restarting computer.'
+    Restart-Computer -Force
 } else {
-    Log-Message "Restart aborted by the user."
+    Write-MigrationLog 'Restart skipped by user.'
 }

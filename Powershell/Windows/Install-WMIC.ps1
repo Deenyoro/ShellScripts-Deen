@@ -1,165 +1,121 @@
-# Manage-WMIC.ps1
-# Script to ensure WMIC is installed and operational
+﻿<#
+.SYNOPSIS
+    Ensure the WMIC Windows capability is installed and WMIC.exe is working.
 
-# Enable strict mode for better error handling
+.DESCRIPTION
+    Tries Add-WindowsCapability first, then falls back to the DISM CLI.
+    Writes a timestamped log to C:\MDM\wmic_install.log and drops a marker
+    file at C:\MDM\wmic_install_complete.txt on success (useful as a
+    detection rule target in Intune Win32 apps).
+#>
+
+#Requires -RunAsAdministrator
+[CmdletBinding()]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter','CapabilityName',Justification='Used inside nested functions via script scope.')]
+param(
+    [string]$CapabilityName = 'WMIC~~~~',
+    [string]$MarkerFile     = 'C:\MDM\wmic_install_complete.txt',
+    [string]$LogFile        = 'C:\MDM\wmic_install.log'
+)
+
 Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
 
-# Define Variables
-$capabilityName = "WMIC~~~~"
-$markerFilePath = "C:\MDM\wmic_install_complete.txt"
-$logFilePath = "C:\MDM\wmic_install.log"
-$dismCommand = "DISM /Online /Add-Capability /CapabilityName:$capabilityName"
+$wmicPath = Join-Path $env:WinDir 'System32\wbem\WMIC.exe'
 
-# Function to log messages with timestamps
-function Write-Log {
-    param (
-        [string]$Message,
-        [string]$Severity = "INFO"
-    )
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $logEntry = "$timestamp [$Severity] $Message"
-
-    # Ensure the log directory exists
-    $logDir = Split-Path $logFilePath -Parent
-    if (-not (Test-Path $logDir)) {
-        New-Item -Path $logDir -ItemType Directory -Force | Out-Null
-    }
-
-    # Write log entry to file
-    $logEntry | Out-File -FilePath $logFilePath -Append -Encoding UTF8
-
-    # Optionally output to console (remove if not needed)
-    Write-Output $logEntry
+foreach ($p in ($LogFile, $MarkerFile)) {
+    $parent = Split-Path -Parent $p
+    if (-not (Test-Path -LiteralPath $parent)) { New-Item -Path $parent -ItemType Directory -Force | Out-Null }
 }
 
-# Function to check if WMIC is installed and operational
-function Verify-WMIC {
-    # Check if wmic.exe exists
-    $wmicPath = "C:\Windows\System32\wbem\WMIC.exe"
-    $wmicExists = Test-Path $wmicPath
+function Write-MdmLog {
+    param(
+        [Parameter(Mandatory)][string]$Message,
+        [ValidateSet('INFO','WARN','ERROR')] [string]$Severity = 'INFO'
+    )
+    $line = "{0} [{1}] {2}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Severity, $Message
+    Add-Content -LiteralPath $LogFile -Value $line
+    Write-Host $line
+}
 
-    if ($wmicExists) {
-        try {
-            # Test WMIC functionality
-            $wmicTest = & $wmicPath /?
-            if ($wmicTest) {
-                Write-Log "WMIC is installed and operational."
-                return $true
-            } else {
-                Write-Log "WMIC executable found but not operational." "ERROR"
-                return $false
-            }
-        } catch {
-            Write-Log "Error executing WMIC: $_" "ERROR"
-            return $false
-        }
-    } else {
-        Write-Log "WMIC executable not found." "ERROR"
+function Test-WmicOperational {
+    if (-not (Test-Path -LiteralPath $wmicPath)) { return $false }
+    try {
+        $null = & $wmicPath /? 2>&1
+        return $LASTEXITCODE -eq 0
+    } catch {
         return $false
     }
 }
 
-# Function to install WMIC using Add-WindowsCapability
-function Install-WMIC {
+function Install-WmicCapability {
     try {
-        Write-Log "Attempting to install WMIC using Add-WindowsCapability..."
-        Add-WindowsCapability -Online -Name $capabilityName -ErrorAction Stop | Out-Null
-        Write-Log "Add-WindowsCapability command executed successfully."
+        Write-MdmLog 'Attempting Add-WindowsCapability...'
+        Add-WindowsCapability -Online -Name $CapabilityName -ErrorAction Stop | Out-Null
+        Write-MdmLog 'Add-WindowsCapability succeeded.'
         return $true
     } catch {
-        Write-Log "Add-WindowsCapability failed: $_" "ERROR"
+        Write-MdmLog "Add-WindowsCapability failed: $($_.Exception.Message)" 'WARN'
         return $false
     }
 }
 
-# Function to install WMIC using DISM
-function Install-WMIC_Dism {
+function Install-WmicViaDism {
     try {
-        Write-Log "Attempting to install WMIC using DISM..."
-        # Execute DISM command
-        $process = Start-Process -FilePath "cmd.exe" -ArgumentList "/c $dismCommand" -Wait -NoNewWindow -PassThru
-        if ($process.ExitCode -eq 0) {
-            Write-Log "DISM command executed successfully."
+        Write-MdmLog 'Falling back to DISM...'
+        $proc = Start-Process -FilePath 'dism.exe' `
+            -ArgumentList '/Online','/Add-Capability',"/CapabilityName:$CapabilityName" `
+            -Wait -NoNewWindow -PassThru
+        if ($proc.ExitCode -eq 0) {
+            Write-MdmLog 'DISM succeeded.'
             return $true
-        } else {
-            Write-Log "DISM command failed with Exit Code: $($process.ExitCode)" "ERROR"
-            return $false
         }
+        Write-MdmLog "DISM failed (exit $($proc.ExitCode))." 'ERROR'
+        return $false
     } catch {
-        Write-Log "DISM command failed: $_" "ERROR"
+        Write-MdmLog "DISM threw: $($_.Exception.Message)" 'ERROR'
         return $false
     }
 }
 
-# Function to create the marker file
-function Create-MarkerFile {
-    try {
-        if (-not (Test-Path $markerFilePath)) {
-            # Ensure the directory exists
-            $markerDir = Split-Path $markerFilePath -Parent
-            if (-not (Test-Path $markerDir)) {
-                New-Item -Path $markerDir -ItemType Directory -Force | Out-Null
-                Write-Log "Created directory $markerDir."
-            }
-            New-Item -Path $markerFilePath -ItemType File -Force | Out-Null
-            Write-Log "Created marker file at $markerFilePath."
-        } else {
-            Write-Log "Marker file already exists at $markerFilePath."
-        }
-    } catch {
-        Write-Log "Failed to create marker file: $_" "ERROR"
+function Set-MarkerFile {
+    if (Test-Path -LiteralPath $MarkerFile) { return }
+    New-Item -Path $MarkerFile -ItemType File -Force | Out-Null
+    Write-MdmLog "Created marker $MarkerFile"
+}
+
+function Remove-MarkerFile {
+    if (Test-Path -LiteralPath $MarkerFile) {
+        Remove-Item -LiteralPath $MarkerFile -Force
+        Write-MdmLog "Removed stale marker $MarkerFile"
     }
 }
 
-# Function to delete the marker file
-function Delete-MarkerFile {
-    try {
-        if (Test-Path $markerFilePath) {
-            Remove-Item -Path $markerFilePath -Force
-            Write-Log "Deleted marker file at $markerFilePath."
-        } else {
-            Write-Log "Marker file does not exist at $markerFilePath."
-        }
-    } catch {
-        Write-Log "Failed to delete marker file: $_" "ERROR"
-    }
+Write-MdmLog '----- WMIC install starting -----'
+
+if (Test-WmicOperational) {
+    Write-MdmLog 'WMIC is already installed and operational.'
+    Set-MarkerFile
+    Write-MdmLog '----- Done -----'
+    return
 }
 
-# Main Execution Flow
-Write-Log "----- Starting WMIC Management Script -----"
+$ok = Install-WmicCapability
+if (-not $ok) { $ok = Install-WmicViaDism }
 
-# Check if WMIC is already installed and operational
-if (Verify-WMIC) {
-    Write-Log "WMIC is already installed and operational."
-    # Create marker file if not already present
-    Create-MarkerFile
+if (-not $ok) {
+    Write-MdmLog 'Both install methods failed.' 'ERROR'
+    Remove-MarkerFile
+    exit 1
+}
+
+if (Test-WmicOperational) {
+    Write-MdmLog 'Post-install verification succeeded.'
+    Set-MarkerFile
 } else {
-    Write-Log "WMIC is not installed or not operational. Proceeding with installation..."
-
-    # Attempt installation using Add-WindowsCapability
-    $installResult = Install-WMIC
-
-    if (-not $installResult) {
-        Write-Log "Initial installation attempt failed. Trying DISM command..."
-        $installResult = Install-WMIC_Dism
-    }
-
-    if ($installResult) {
-        Write-Log "Installation command executed. Verifying installation..."
-        if (Verify-WMIC) {
-            Write-Log "WMIC installation verified successfully."
-            # Create marker file
-            Create-MarkerFile
-        } else {
-            Write-Log "WMIC verification failed after installation." "ERROR"
-            # Delete marker file if it exists
-            Delete-MarkerFile
-        }
-    } else {
-        Write-Log "Both installation methods failed. Exiting script." "ERROR"
-        # Delete marker file if it exists
-        Delete-MarkerFile
-    }
+    Write-MdmLog 'Install command reported success, but WMIC still not operational.' 'ERROR'
+    Remove-MarkerFile
+    exit 1
 }
 
-Write-Log "----- WMIC Management Script Completed -----"
+Write-MdmLog '----- Done -----'

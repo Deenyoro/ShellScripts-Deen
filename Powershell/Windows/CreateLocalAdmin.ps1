@@ -1,45 +1,72 @@
-# This script assumes you are running it with administrative privileges
-# Function to get secure password input
-function Get-SecurePassword {
-    param (
-        [string]$prompt = "Enter password: ",
-        [string]$default = "Pass1Word"
-    )
-    $input = Read-Host -Prompt $prompt
-    if ($input -eq "") {
-        Write-Host "No password entered, using default password: Pass1Word"
-        $SecureString = ConvertTo-SecureString $default -AsPlainText -Force
-    } else {
-        $SecureString = $input | ConvertTo-SecureString -AsPlainText -Force
+﻿<#
+.SYNOPSIS
+    Create a local administrator account (interactively) and optionally
+    enable Remote Desktop for it.
+
+.NOTES
+    Must be run elevated. Will not clobber an existing account of the same
+    name. No default password is used — the user is re-prompted until a
+    non-empty password is entered.
+#>
+
+#Requires -RunAsAdministrator
+[CmdletBinding()]
+param(
+    [string]$UserName,
+    [switch]$EnableRdp
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+function Read-NonEmptySecureString {
+    param([Parameter(Mandatory)][string]$Prompt)
+    while ($true) {
+        $secure = Read-Host -Prompt $Prompt -AsSecureString
+        if ($secure.Length -gt 0) { return $secure }
+        Write-Warning 'Password cannot be empty.'
     }
-    return $SecureString
 }
-# Function to get input with a default value
-function Get-InputWithDefault {
-    param (
-        [string]$prompt,
-        [string]$default
-    )
-    $input = Read-Host -Prompt "$prompt (Default: $default)"
-    if ($input -eq "") {
-        return $default
+
+function Read-YesNo {
+    param([Parameter(Mandatory)][string]$Prompt)
+    while ($true) {
+        $ans = (Read-Host "$Prompt (Y/N)").Trim().ToUpperInvariant()
+        if ($ans -eq 'Y') { return $true }
+        if ($ans -eq 'N') { return $false }
     }
-    return $input
 }
-# Ask to create local admin account
-$createLocalAdmin = Read-Host -Prompt "Do you want to create a local admin account? (Y/N)"
-if ($createLocalAdmin -eq 'Y') {
-    $localAdminUsername = Get-InputWithDefault -prompt "Enter the new local admin username" -default "Admin"
-    $localAdminPassword = Get-SecurePassword -Prompt "Enter the new local admin password"
-Write-Host "Creating local admin account..."
-    $localAdminAccount = New-LocalUser -Name $localAdminUsername -Password $localAdminPassword -FullName "Local Administrator" -Description "Local admin account" -UserMayNotChangePassword -PasswordNeverExpires
-    Add-LocalGroupMember -Group "Administrators" -Member $localAdminAccount.Name
-    Write-Host "Local admin account created."
-# Ask to enable RDP for the admin account
-    $enableRDP = Read-Host -Prompt "Do you want to enable RDP for this admin account? (Y/N)"
-    if ($enableRDP -eq 'Y') {
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
-        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-        Write-Host "RDP has been enabled for the account: $localAdminUsername"
-    }
+
+if (-not (Read-YesNo 'Create a local admin account?')) {
+    return
+}
+
+if (-not $UserName) {
+    $answer = Read-Host 'New local admin username (Default: Admin)'
+    $UserName = if ([string]::IsNullOrWhiteSpace($answer)) { 'Admin' } else { $answer }
+}
+
+if (Get-LocalUser -Name $UserName -ErrorAction SilentlyContinue) {
+    throw "Local user '$UserName' already exists."
+}
+
+$password = Read-NonEmptySecureString -Prompt "Password for '$UserName'"
+
+Write-Host "Creating local admin '$UserName'..."
+$null = New-LocalUser -Name $UserName -Password $password `
+    -FullName 'Local Administrator' -Description 'Local admin account' `
+    -UserMayNotChangePassword -PasswordNeverExpires
+Add-LocalGroupMember -Group 'Administrators' -Member $UserName
+Write-Host "Created '$UserName' and added to Administrators."
+
+if (-not $EnableRdp) {
+    $EnableRdp = Read-YesNo 'Enable RDP for this machine?'
+}
+if ($EnableRdp) {
+    Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+        -Name 'fDenyTSConnections' -Value 0
+    Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'
+    # Also grant the new account RDP rights explicitly.
+    Add-LocalGroupMember -Group 'Remote Desktop Users' -Member $UserName -ErrorAction SilentlyContinue
+    Write-Host 'RDP enabled.'
 }
