@@ -264,6 +264,8 @@ def validate_topology(topo):
     carp = topo.get("carp", {})
     if "password" not in carp or not carp["password"]:
         errors.append("carp.password missing or empty")
+    elif carp["password"].startswith("CHANGE-ME"):
+        errors.append("carp.password is still the placeholder — set a real password in the topology file")
     if carp.get("primary_advskew") == carp.get("secondary_advskew"):
         errors.append("carp.primary_advskew must differ from carp.secondary_advskew")
 
