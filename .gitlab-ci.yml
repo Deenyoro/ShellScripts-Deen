@@ -1,6 +1,6 @@
 freepbx-runtime-guard:
   tags: [linux]
-  image: php:8.2-cli-bookworm
+  image: php:8.5-cli-bookworm
   rules:
     - changes:
         - Bash/Telephony/freepbx-runtime-guard/**/*
