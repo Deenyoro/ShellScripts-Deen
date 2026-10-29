@@ -1,0 +1,9 @@
+[Unit]
+Description=Back up FreePBX runtime and saved configuration
+After=mariadb.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/kc-pbx-runtime/backup.sh
+TimeoutStartSec=120
+UMask=0077

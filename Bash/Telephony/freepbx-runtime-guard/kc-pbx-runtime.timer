@@ -1,0 +1,11 @@
+[Unit]
+Description=Check FreePBX runtime mappings every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+RandomizedDelaySec=5s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

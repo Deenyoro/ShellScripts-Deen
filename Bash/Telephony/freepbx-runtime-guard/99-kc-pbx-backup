@@ -1,0 +1,1 @@
+DPkg::Pre-Invoke { "if [ -r /var/lib/asterisk/astdb.sqlite3 ]; then /usr/local/lib/kc-pbx-runtime/backup.sh >/dev/null || logger -p daemon.err -t kc-pbx-backup 'Pre-upgrade FreePBX backup failed'; fi"; };

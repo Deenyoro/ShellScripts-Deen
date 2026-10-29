@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily FreePBX configuration backup
+
+[Timer]
+OnCalendar=*-*-* 04:15:00
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,18 @@
+freepbx-runtime-guard:
+  tags: [linux]
+  image: php:8.2-cli-bookworm
+  rules:
+    - changes:
+        - Bash/Telephony/freepbx-runtime-guard/**/*
+        - .gitlab-ci.yml
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y --no-install-recommends python3
+  script:
+    - cd Bash/Telephony/freepbx-runtime-guard
+    - php -l runtime-guard.php
+    - php test-runtime.php
+    - python3 test-health.py
+    - bash -n install.sh backup.sh test-diversion.sh
+    - bash test-diversion.sh

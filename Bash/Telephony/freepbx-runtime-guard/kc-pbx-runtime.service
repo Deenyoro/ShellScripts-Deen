@@ -1,0 +1,11 @@
+[Unit]
+Description=Verify and restore missing FreePBX runtime mappings
+After=freepbx.service mariadb.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/php /usr/local/lib/kc-pbx-runtime/runtime-guard.php --repair
+TimeoutStartSec=45
+UMask=0077
+StateDirectory=kc-pbx-runtime
+StateDirectoryMode=0755
